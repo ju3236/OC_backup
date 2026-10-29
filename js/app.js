@@ -23,6 +23,7 @@
     key: null,          // 계정 공용 키 (토큰을 여는 열쇠)
     accounts: null,     // data/accounts.json
     filter: { q: '', world: '', tag: '', owner: '' },
+    docFilter: { q: '', world: '', tag: '', owner: '' },
     postFilter: { owner: '' },
     draft: null,
     localImgs: {},      // 이번 세션에 업로드한 그림 미리보기 (path -> dataURL)
@@ -130,13 +131,30 @@
       color: safeColor(c.color),
       avatar: str(c.avatar),
       tags: arr(c.tags).map(str).filter(Boolean),
-      profile: arr(c.profile).map((p) => ({ label: str(p.label), value: str(p.value) })),
-      sections: arr(c.sections).map((s) => ({ title: str(s.title), body: str(s.body) })),
+      kind: c.kind === 'doc' ? 'doc' : 'oc',
+      doc: 3,
+      notices: arr(c.notices).map((n) => ({ icon: str(n.icon) || '⚠️', text: str(n.text) })),
+      // doc 3 이전(글자만 쓰던 시절) 데이터는 HTML로 바꿔서 읽어요
+      profile: arr(c.profile).map((p) => ({
+        type: p.type === 'head' ? 'head' : 'row',
+        label: str(p.label),
+        value: p.type === 'head' ? '' : (c.doc === 3 ? str(p.value) : textToHtml(str(p.value))),
+      })),
+      chapters: Array.isArray(c.chapters) ? normChapters(c.chapters, 0)
+        : arr(c.sections).map((x) => ({ id: uid('ch'), title: str(x.title), body: x.body ? `<p>${textToHtml(str(x.body))}</p>` : '', children: [] })),
       images: normImages(c.images),
       relations: arr(c.relations).map((r) => ({ id: str(r.id), name: str(r.name), type: str(r.type), note: str(r.note) })),
       createdAt: c.createdAt || now,
       updatedAt: c.updatedAt || now,
     };
+  }
+  function normChapters(list, depth) {
+    return arr(list).map((ch) => ({
+      id: str(ch.id) || uid('ch'),
+      title: str(ch.title),
+      body: str(ch.body),
+      children: depth < 6 ? normChapters(ch.children, depth + 1) : [],
+    }));
   }
   function normalizePost(p) {
     const now = new Date().toISOString();
@@ -470,10 +488,13 @@
   }
 
   // ---------- character list ----------
-  function renderCharacters() {
-    renderChrome('oc');
-    const all = db().characters;
-    const f = state.filter;
+  function renderCharacters(kind) {
+    const isDoc = kind === 'doc';
+    renderChrome(isDoc ? 'docs' : 'oc');
+    const all = db().characters.filter((c) => c.kind === kind);
+    const f = isDoc ? state.docFilter : state.filter;
+    const noun = isDoc ? '문서' : '캐릭터';
+    const newHash = isDoc ? '#/new?kind=doc' : '#/new';
     const owners = [...new Set(all.map((c) => c.owner).filter(Boolean))].sort();
     const worlds = [...new Set(all.map((c) => c.world).filter(Boolean))].sort();
     const tags = [...new Set(all.flatMap((c) => c.tags))].sort();
@@ -483,8 +504,8 @@
 
     $app.innerHTML = `
       <div class="page-head">
-        <h1>캐릭터</h1>
-        ${state.user ? '<a href="#/new" class="btn btn-primary">+ 새 캐릭터</a>' : ''}
+        <h1>${noun}</h1>
+        ${state.user ? `<a href="${newHash}" class="btn btn-primary">+ 새 ${noun}</a>` : ''}
       </div>
       ${ownerChips(owners, f.owner)}
       <div class="toolbar">
@@ -508,17 +529,17 @@
         if (f.world && c.world !== f.world) return false;
         if (f.tag && !c.tags.includes(f.tag)) return false;
         if (!q) return true;
-        return [c.name, c.subname, c.summary, c.world, ...c.tags].join(' ').toLowerCase().includes(q);
+        return [c.name, c.subname, c.summary, c.world, ...c.tags, ...c.profile.map((r) => r.label + ' ' + r.value)].join(' ').toLowerCase().includes(q);
       }).sort((a, b) => (b.updatedAt > a.updatedAt ? 1 : -1));
       if (!all.length) {
-        $results.innerHTML = `<div class="empty">아직 등록된 캐릭터가 없어요.${state.user ? '<br><a class="btn btn-primary" href="#/new">+ 첫 캐릭터 만들기</a>' : ''}</div>`;
+        $results.innerHTML = `<div class="empty">${isDoc ? '세계관 설정, 용어 정리처럼 캐릭터가 아닌 문서를 모아 두는 곳이에요.<br>아직 문서가 없어요.' : '아직 등록된 캐릭터가 없어요.'}${state.user ? `<br><a class="btn btn-primary" href="${newHash}">+ 첫 ${noun} 만들기</a>` : ''}</div>`;
         return;
       }
       if (!list.length) {
-        $results.innerHTML = '<div class="empty">조건에 맞는 캐릭터가 없어요.</div>';
+        $results.innerHTML = `<div class="empty">조건에 맞는 ${noun}가 없어요.</div>`;
         return;
       }
-      $results.innerHTML = `<div class="count">${list.length}명</div><div class="grid">${list.map((c) => `
+      $results.innerHTML = `<div class="count">${list.length}${isDoc ? '개' : '명'}</div><div class="grid">${list.map((c) => `
         <a class="card" href="#/oc/${encId(c.id)}" style="--oc:${safeColor(c.color)}">
           <div class="card-thumb">${thumbHtml(c)}</div>
           <div class="card-body">
@@ -589,7 +610,192 @@
     }));
   }
 
-  // ---------- character detail ----------
+  // ---------- wiki document: 안전한 HTML ----------
+  // 문서 본문은 서식이 있는 HTML이라, 보여 주거나 저장할 때마다 허용한 태그·속성만 남겨요.
+  const ALLOWED_TAGS = new Set(['P', 'BR', 'B', 'STRONG', 'I', 'EM', 'U', 'S', 'STRIKE', 'DEL', 'SUP', 'SUB', 'SPAN', 'A',
+    'UL', 'OL', 'LI', 'BLOCKQUOTE', 'HR', 'IMG', 'TABLE', 'THEAD', 'TBODY', 'TR', 'TH', 'TD', 'DIV', 'H3', 'H4', 'FONT']);
+  const DROP_TAGS = new Set(['SCRIPT', 'STYLE', 'IFRAME', 'OBJECT', 'EMBED', 'TEMPLATE', 'NOSCRIPT', 'SVG', 'MATH', 'LINK',
+    'META', 'TITLE', 'HEAD', 'FORM', 'INPUT', 'BUTTON', 'TEXTAREA', 'SELECT', 'VIDEO', 'AUDIO', 'CANVAS']);
+  const STYLE_PROPS = new Set(['color', 'background-color', 'font-size', 'font-weight', 'font-style', 'text-decoration',
+    'text-decoration-line', 'text-align', 'width']);
+  const FONT_SIZES = { 1: '0.75em', 2: '0.875em', 3: '1em', 4: '1.15em', 5: '1.35em', 6: '1.6em', 7: '2em' };
+  const NOTICE_ICONS = ['⚠️', 'ℹ️', '❗', '🚫', '💻', '📱', '📢', '🔒', '🔞', '⭐', '❤️', '📖'];
+
+  function cleanStyle(v) {
+    return String(v || '').split(';').map((d) => {
+      const i = d.indexOf(':');
+      if (i < 0) return '';
+      const prop = d.slice(0, i).trim().toLowerCase();
+      const val = d.slice(i + 1).trim();
+      if (!STYLE_PROPS.has(prop) || !val || val.length > 60 || /url\(|expression|[<>\\]/i.test(val)) return '';
+      return `${prop}: ${val}`;
+    }).filter(Boolean).join('; ');
+  }
+  function cleanHref(v) {
+    v = String(v || '').trim();
+    return /^(https?:\/\/|mailto:|#\/)/i.test(v) ? v : '';
+  }
+
+  // mode 'view': 그림을 보여 줄 주소로 / 'store': 저장용. 붙여넣은 data: 그림은 파일로 바꿔 files에 담아요.
+  function cleanHtml(html, mode, files) {
+    const doc = new DOMParser().parseFromString(`<body>${html || ''}</body>`, 'text/html');
+    const walk = (node) => {
+      [...node.childNodes].forEach((n) => {
+        if (n.nodeType === 3) return;
+        if (n.nodeType !== 1) { n.remove(); return; }
+        const tag = n.tagName.toUpperCase();
+        if (DROP_TAGS.has(tag)) { n.remove(); return; }
+        walk(n);
+        if (!ALLOWED_TAGS.has(tag)) { n.replaceWith(...n.childNodes); return; }
+        if (tag === 'FONT') {
+          const span = doc.createElement('span');
+          const st = [];
+          if (n.getAttribute('color')) st.push(`color: ${n.getAttribute('color')}`);
+          if (FONT_SIZES[n.getAttribute('size')]) st.push(`font-size: ${FONT_SIZES[n.getAttribute('size')]}`);
+          if (n.getAttribute('style')) st.push(n.getAttribute('style'));
+          span.setAttribute('style', st.join(';'));
+          span.append(...n.childNodes);
+          n.replaceWith(span);
+          cleanAttrs(span, 'SPAN', mode, files);
+          return;
+        }
+        cleanAttrs(n, tag, mode, files);
+      });
+    };
+    walk(doc.body);
+    return doc.body.innerHTML;
+  }
+
+  function cleanAttrs(el, tag, mode, files) {
+    const keep = {};
+    [...el.attributes].forEach((a) => {
+      const name = a.name.toLowerCase();
+      const v = a.value;
+      if (name === 'style') { const st = cleanStyle(v); if (st) keep.style = st; }
+      else if (name === 'class') { const cl = v.split(/\s+/).filter((x) => x === 'fn' || x === 'spoiler').join(' '); if (cl) keep.class = cl; }
+      else if (name === 'href' && tag === 'A') { const h = cleanHref(v); if (h) keep.href = h; }
+      else if (name === 'data-note' && tag === 'SUP') keep['data-note'] = v.slice(0, 2000);
+      else if ((name === 'colspan' || name === 'rowspan') && /^\d{1,2}$/.test(v)) keep[name] = v;
+      else if (name === 'alt' && tag === 'IMG') keep.alt = v.slice(0, 200);
+    });
+    if (tag === 'IMG') {
+      let path = el.getAttribute('data-src') || el.getAttribute('src') || '';
+      if (/^data:image\//i.test(path) && mode === 'store') {
+        const f = state.user ? dataUrlToFile(path) : null;
+        if (!f) { el.remove(); return; }
+        files.push(f);
+        path = f.path;
+      }
+      path = safeSrc(path);
+      if (!/^(images\/|https?:)/i.test(path) && !(mode === 'view' && /^data:image\//i.test(path))) { el.remove(); return; }
+      keep['data-src'] = path;
+      if (mode === 'view') { keep.src = imgUrl(path); keep.loading = 'lazy'; }
+    }
+    if (tag === 'A' && /^(https?:|mailto:)/i.test(keep.href || '')) { keep.target = '_blank'; keep.rel = 'noopener noreferrer'; }
+    [...el.attributes].forEach((a) => el.removeAttribute(a.name));
+    Object.entries(keep).forEach(([k, v]) => el.setAttribute(k, v));
+  }
+
+  const textToHtml = (t) => esc(t).replace(/\n/g, '<br>');
+  function isBlankHtml(html) {
+    const t = document.createElement('div');
+    t.innerHTML = cleanHtml(html, 'view');
+    return !t.textContent.replace(/[\s​]/g, '') && !t.querySelector('img, hr, table, sup');
+  }
+
+  // ---------- wiki document: 보기 ----------
+  const anchorOf = (num) => 's-' + num.replace(/\./g, '-');
+
+  function tocHtml(list, prefix) {
+    if (!list.length) return '';
+    return `<ol>${list.map((ch, i) => {
+      const num = prefix ? `${prefix}.${i + 1}` : String(i + 1);
+      return `<li><a data-goto="${anchorOf(num)}"><span class="num">${num}.</span> ${esc(ch.title || '(제목 없음)')}</a>${tocHtml(ch.children, num)}</li>`;
+    }).join('')}</ol>`;
+  }
+
+  function chaptersHtml(list, prefix, path, edit) {
+    return list.map((ch, i) => {
+      const num = prefix ? `${prefix}.${i + 1}` : String(i + 1);
+      const p = path ? `${path}.children.${i}` : `chapters.${i}`;
+      const depth = Math.min(num.split('.').length - 1, 3);
+      const kids = chaptersHtml(ch.children, num, p, edit);
+      if (!edit) {
+        return `<section class="wiki-sec" id="${anchorOf(num)}">
+          <h2 class="wiki-h d${depth}" data-fold><span class="num">${num}.</span> <span class="t">${esc(ch.title)}</span><span class="fold-mark" aria-hidden="true"></span></h2>
+          <div class="wiki-sec-in">${isBlankHtml(ch.body) ? '' : `<div class="wiki-body">${cleanHtml(ch.body, 'view')}</div>`}${kids}</div>
+        </section>`;
+      }
+      const idx = (p.match(/\d+/g) || []).join('.');
+      const ctl = (act, label, title, show) => (show ? `<button type="button" data-ch-act="${act}" data-ch="${idx}" title="${title}">${label}</button>` : '');
+      return `<section class="wiki-sec">
+        <div class="wiki-h d${depth}"><span class="num">${num}.</span>
+          <span class="ch-title" contenteditable="true" data-text="${p}.title" data-placeholder="챕터 제목">${esc(ch.title)}</span>
+          <span class="ch-ctl">
+            ${ctl('up', '↑', '위로', i > 0)}${ctl('down', '↓', '아래로', i < list.length - 1)}
+            ${ctl('out', '⇤', '한 단계 위로', depth > 0)}${ctl('in', '⇥', '한 단계 아래로', i > 0)}
+            ${ctl('child', '＋', '하위 챕터 추가', true)}${ctl('del', '×', '챕터 삭제', true)}
+          </span></div>
+        <div class="wiki-body" contenteditable="true" data-html="${p}.body" data-placeholder="내용을 입력하세요">${cleanHtml(ch.body, 'view')}</div>
+        ${kids}
+      </section>`;
+    }).join('');
+  }
+
+  function infoboxHtml(c) {
+    const cover = coverOf(c);
+    if (!cover && !c.profile.length) return '';
+    return `<aside class="infobox">
+      <div class="ib-title">${esc(c.name)}${c.subname ? `<small>${esc(c.subname)}</small>` : ''}</div>
+      ${cover ? `<div class="ib-img" data-zoom="${esc(imgUrl(cover))}" data-caption="${esc(c.name)}"><img src="${esc(imgUrl(cover))}" alt="${esc(c.name)}"></div>` : ''}
+      ${c.profile.length ? `<table><tbody>${c.profile.map((r) => (r.type === 'head'
+        ? `<tr><th colspan="2" class="ib-group">${esc(r.label)}</th></tr>`
+        : `<tr><th>${esc(r.label)}</th><td>${cleanHtml(r.value, 'view')}</td></tr>`)).join('')}</tbody></table>` : ''}
+    </aside>`;
+  }
+
+  const noticeHtml = (n) => `<div class="wiki-notice"><span class="ni" aria-hidden="true">${esc(n.icon)}</span><div>${cleanHtml(n.text, 'view')}</div></div>`;
+
+  // 각주 번호를 매기고 문서 아래 각주 목록을 채워요
+  function finishDoc(root) {
+    const notes = [];
+    root.querySelectorAll('.wiki sup.fn').forEach((s, i) => {
+      const n = i + 1;
+      notes.push(s.getAttribute('data-note') || '');
+      s.id = 'fnref-' + n;
+      s.tabIndex = 0;
+      s.textContent = `[${n}]`;
+    });
+    const $list = root.querySelector('.wiki-fns');
+    if ($list && notes.length) {
+      $list.hidden = false;
+      $list.querySelector('ol').innerHTML = notes.map((t, i) => `<li id="fn-${i + 1}"><a data-goto="fnref-${i + 1}">[${i + 1}]</a> ${esc(t)}</li>`).join('');
+    }
+  }
+
+  // 목차·각주 이동, 챕터 접기, 각주 팝업, 스포일러 (편집 중인 칸 안에서는 동작하지 않음)
+  document.addEventListener('click', (e) => {
+    if (e.target.closest('[contenteditable="true"]')) return;
+    const g = e.target.closest('[data-goto]');
+    if (g) {
+      const t = document.getElementById(g.dataset.goto);
+      if (!t) return;
+      for (let s = t.closest('.wiki-sec.closed'); s; s = s.parentElement.closest('.wiki-sec.closed')) s.classList.remove('closed');
+      t.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      t.classList.add('flash');
+      setTimeout(() => t.classList.remove('flash'), 1400);
+      return;
+    }
+    const f = e.target.closest('[data-fold]');
+    if (f) { f.closest('.wiki-sec').classList.toggle('closed'); return; }
+    const fn = e.target.closest('.wiki sup.fn');
+    document.querySelectorAll('.wiki sup.fn.open').forEach((x) => { if (x !== fn) x.classList.remove('open'); });
+    if (fn) { fn.classList.toggle('open'); return; }
+    const sp = e.target.closest('.wiki .spoiler');
+    if (sp) sp.classList.toggle('show');
+  });
+
+  // ---------- character / document detail ----------
   function galleryHtml(images, fallbackAlt) {
     if (!images.length) return '';
     return `<div class="gallery">
@@ -601,13 +807,15 @@
   }
 
   function renderDetail(id) {
-    renderChrome('oc');
     const c = findChar(id);
+    renderChrome(c && c.kind === 'doc' ? 'docs' : 'oc');
     if (!c) return renderNotFound();
     const color = safeColor(c.color);
-    const cover = coverOf(c);
+    const listHash = c.kind === 'doc' ? '#/docs' : '#/';
     document.title = `${c.name} · ${db().siteTitle}`;
     const related = db().posts.filter((p) => p.chars.includes(c.id)).sort((a, b) => (b.createdAt > a.createdAt ? 1 : -1));
+    const cover = coverOf(c);
+    const gallery = c.images.length > 1 ? c.images : [];
 
     const relHtml = c.relations.map((r) => {
       const t = (r.id && findChar(r.id)) || db().characters.find((x) => x.name === r.name);
@@ -621,55 +829,54 @@
         : `<div class="relation">${inner}</div>`;
     }).join('');
 
+    const cats = [
+      ...(c.world ? [`<a data-cat-world="${esc(c.world)}">${esc(c.world)}</a>`] : []),
+      ...c.tags.map((t) => `<a data-cat-tag="${esc(t)}">${esc(t)}</a>`),
+    ];
+
     $app.innerHTML = `
-      <article style="--oc:${color}">
-        <a class="back" href="#/">← 캐릭터 목록</a>
-        <div class="hero">
-          <div class="hero-img ${cover ? '' : 'no-img'}" ${cover ? `data-zoom="${esc(imgUrl(cover))}" data-caption="${esc(c.name)}"` : ''}>${thumbHtml(c)}</div>
-          <div>
-            ${c.world ? `<span class="world">${esc(c.world)}</span>` : ''}
-            <h1>${esc(c.name)}</h1>
-            ${c.subname ? `<div class="sub">${esc(c.subname)}</div>` : ''}
-            ${c.owner ? `<div class="owner-line">${byline(c.owner)}의 자캐</div>` : ''}
-            ${c.summary ? `<p class="summary">${esc(c.summary)}</p>` : ''}
-            ${c.tags.length ? `<div class="tags">${c.tags.map((t) => `<span class="tag">#${esc(t)}</span>`).join('')}</div>` : ''}
-            <div class="actions">
-              ${isMine(c.owner) ? `<a class="btn btn-primary" href="#/edit/${encId(c.id)}">편집</a>` : ''}
-              ${state.user ? `<a class="btn" href="#/write?oc=${encId(c.id)}">이 캐릭터로 글쓰기</a>` : ''}
-              ${isMine(c.owner) ? '<button type="button" class="btn btn-danger" id="delete">삭제</button>' : ''}
-            </div>
-            ${c.profile.length ? `<table class="profile-table"><tbody>
-              ${c.profile.map((p) => `<tr><th>${esc(p.label)}</th><td>${esc(p.value)}</td></tr>`).join('')}
-            </tbody></table>` : ''}
+      <article class="wiki" style="--oc:${color}">
+        <a class="back" href="${listHash}">← ${c.kind === 'doc' ? '문서 목록' : '캐릭터 목록'}</a>
+        ${cats.length ? `<div class="wiki-cats"><b>분류</b> ${cats.join('<span class="sep">|</span>')}</div>` : ''}
+        <div class="wiki-head">
+          <h1>${esc(c.name)}</h1>
+          <div class="wiki-actions">
+            ${isMine(c.owner) ? `<a class="btn btn-sm btn-primary" href="#/edit/${encId(c.id)}">✎ 편집</a>` : ''}
+            ${state.user ? `<a class="btn btn-sm" href="#/write?oc=${encId(c.id)}">글쓰기</a>` : ''}
+            ${isMine(c.owner) ? '<button type="button" class="btn btn-sm btn-danger" id="delete">삭제</button>' : ''}
           </div>
         </div>
-
-        ${c.sections.map((s) => `
-          <section class="section">
-            ${s.title ? `<h2>${esc(s.title)}</h2>` : ''}
-            <div class="body">${esc(s.body)}</div>
-          </section>`).join('')}
+        <div class="wiki-meta">${c.owner ? `${byline(c.owner)}<span class="dot">·</span>` : ''}최근 수정 ${esc(fmtDate(c.updatedAt))}</div>
+        ${c.notices.map(noticeHtml).join('')}
+        <div class="wiki-top">
+          ${c.chapters.length ? `<nav class="wiki-toc"><div class="toc-h">목차</div>${tocHtml(c.chapters, '')}</nav>` : ''}
+          ${infoboxHtml(c)}
+        </div>
+        ${chaptersHtml(c.chapters, '', '', false)}
+        ${!c.chapters.length && !c.profile.length ? `<p class="muted">아직 내용이 없어요.${isMine(c.owner) ? ' [편집]을 눌러 써 보세요.' : ''}</p>` : ''}
+        <div class="wiki-fns" hidden><div class="fns-h">각주</div><ol></ol></div>
 
         ${c.relations.length ? `<section class="section"><h2>관계</h2><div class="relations">${relHtml}</div></section>` : ''}
-
-        ${c.images.length ? `<section class="section"><h2>갤러리 <span class="muted">${c.images.length}</span></h2>${galleryHtml(c.images, c.name)}</section>` : ''}
-
+        ${gallery.length ? `<section class="section"><h2>갤러리 <span class="muted">${gallery.length}</span></h2>${galleryHtml(gallery, c.name)}</section>` : ''}
         ${related.length ? `<section class="section"><h2>관련 게시물 <span class="muted">${related.length}</span></h2>
           <div class="post-list compact">${related.map(postCardHtml).join('')}</div></section>` : ''}
-
         ${commentsHtml('oc:' + c.id)}
-
-        <div class="meta">등록 ${esc(fmtDate(c.createdAt))} · 수정 ${esc(fmtDate(c.updatedAt))}</div>
       </article>`;
+    finishDoc($app);
 
+    $app.querySelectorAll('[data-cat-world], [data-cat-tag]').forEach((a) => a.addEventListener('click', () => {
+      const f = c.kind === 'doc' ? state.docFilter : state.filter;
+      Object.assign(f, { q: '', world: a.dataset.catWorld || '', tag: a.dataset.catTag || '', owner: '' });
+      location.hash = listHash;
+    }));
     const $del = document.getElementById('delete');
     if ($del) $del.addEventListener('click', async () => {
       if (!confirm(`'${c.name}'을(를) 삭제할까요?\n(GitHub 기록에는 남아 있어서 저장소 주인이 되살릴 수 있어요.)`)) return;
-      const ok = await trySave(`캐릭터 삭제: ${c.name}`, (d) => {
+      const ok = await trySave(`${c.kind === 'doc' ? '문서' : '캐릭터'} 삭제: ${c.name}`, (d) => {
         d.characters = d.characters.filter((x) => x.id !== c.id);
         d.comments = d.comments.filter((x) => x.target !== 'oc:' + c.id);
       });
-      if (ok) { toast('삭제했어요'); location.hash = '#/'; }
+      if (ok) { toast('삭제했어요'); location.hash = listHash; }
     });
     bindComments('oc:' + c.id, () => renderDetail(id));
   }
@@ -843,19 +1050,21 @@
   }
   const pendingFiles = (d) => d.images.filter((i) => d._files[i.src]).map((i) => ({ path: i.src, base64: d._files[i.src] }));
 
-  // ---------- character editor ----------
-  function renderCharEditor(id) {
-    renderChrome('oc');
-    if (!state.user) return requireLogin();
+  // ---------- character / document editor (위키처럼 문서 위에서 바로 편집) ----------
+  function renderCharEditor(id, query) {
+    if (!state.user) { renderChrome('oc'); return requireLogin(); }
     const key = 'oc:' + (id || 'new');
     if (!state.draft || state.draft._for !== key) {
       const base = id ? findChar(id) : null;
-      if (id && (!base || !isMine(base.owner))) return renderNotFound();
+      if (id && (!base || !isMine(base.owner))) { renderChrome('oc'); return renderNotFound(); }
+      const kind = base ? base.kind : (query.kind === 'doc' ? 'doc' : 'oc');
       const d = JSON.parse(JSON.stringify(base || normalizeChar({
-        id: uid('oc'),
+        id: uid(kind),
+        kind,
+        doc: 3,
         name: '',
-        profile: [{ label: '나이', value: '' }, { label: '성별', value: '' }, { label: '키', value: '' }, { label: '생일', value: '' }],
-        sections: [{ title: '성격', body: '' }, { title: '배경', body: '' }],
+        profile: kind === 'oc' ? ['나이', '성별', '키', '생일', '소속'].map((label) => ({ type: 'row', label, value: '' })) : [],
+        chapters: (kind === 'oc' ? ['개요', '외모', '성격', '배경', '기타'] : ['개요']).map((title) => ({ title, body: '', children: [] })),
       })));
       if (!base) d.name = '';
       d.tagsText = d.tags.join(', ');
@@ -864,75 +1073,100 @@
       state.draft = d;
       window.scrollTo(0, 0);
     }
+    renderChrome(state.draft.kind === 'doc' ? 'docs' : 'oc');
     drawCharEditor(id);
+  }
+
+  function toolbarHtml() {
+    const b = (cmd, label, title) => `<button type="button" class="tb" data-cmd="${cmd}" title="${title}" aria-label="${title}">${label}</button>`;
+    return `<div class="wiki-toolbar" id="wtb" role="toolbar" aria-label="서식">
+      <div class="tb-group">${b('bold', '<b>B</b>', '굵게')}${b('italic', '<i>I</i>', '기울임')}${b('underline', '<u>U</u>', '밑줄')}${b('strikeThrough', '<s>S</s>', '취소선')}${b('superscript', 'x²', '위 첨자')}${b('subscript', 'x₂', '아래 첨자')}</div>
+      <div class="tb-group">
+        <label class="tb tb-color" title="글자 색"><span>A</span><input type="color" data-color="foreColor" value="#d6336c" aria-label="글자 색"></label>
+        <label class="tb tb-color tb-bg" title="글자 배경"><span>A</span><input type="color" data-color="hiliteColor" value="#ffe066" aria-label="글자 배경"></label>
+        <select class="tb" data-size aria-label="글자 크기"><option value="">크기</option><option value="2">작게</option><option value="3">보통</option><option value="5">크게</option><option value="6">아주 크게</option></select>
+      </div>
+      <div class="tb-group">${b('insertUnorderedList', '• 목록', '글머리 목록')}${b('insertOrderedList', '1. 목록', '번호 목록')}${b('justifyLeft', '⇤', '왼쪽 정렬')}${b('justifyCenter', '≡', '가운데 정렬')}${b('justifyRight', '⇥', '오른쪽 정렬')}</div>
+      <div class="tb-group">${b('link', '링크', '링크 (주소 또는 문서 이름)')}<label class="tb" title="그림 넣기">그림<input type="file" accept="image/*" data-body-img hidden></label>${b('table', '표', '표 넣기')}${b('quote', '인용', '인용구')}${b('fn', '각주', '각주')}${b('spoiler', '스포', '스포일러 가리기')}${b('hr', '―', '구분선')}${b('clear', '지우기', '서식 지우기')}</div>
+      <div class="tb-group tb-table" hidden><span class="tb-lbl">표</span>${b('row+', '행+', '행 추가')}${b('row-', '행−', '행 삭제')}${b('col+', '열+', '열 추가')}${b('col-', '열−', '열 삭제')}</div>
+    </div>`;
   }
 
   function drawCharEditor(id) {
     const d = state.draft;
+    const isDoc = d.kind === 'doc';
     const others = db().characters.filter((c) => c.id !== d.id);
     const scrollY = window.scrollY;
-    const cancel = id ? '#/oc/' + encId(id) : '#/';
+    const cancel = id ? '#/oc/' + encId(id) : (isDoc ? '#/docs' : '#/');
+    const cover = coverOf(d);
 
     $app.innerHTML = `
-      <form class="editor" id="editor" autocomplete="off" style="--accent:${safeColor(d.color)}">
-        <a class="back" href="${cancel}">← 취소</a>
-        <h1>${id ? '캐릭터 편집' : '새 캐릭터'}</h1>
+      <form class="wiki wiki-edit" id="editor" autocomplete="off" style="--oc:${safeColor(d.color)};--accent:${safeColor(d.color)}">
+        ${toolbarHtml()}
+        <div class="wiki-edit-head">
+          <a class="back" href="${cancel}">← 취소</a>
+          <span class="muted">문서를 눌러서 바로 쓰고, 글자를 고른 뒤 위 도구로 꾸며요.</span>
+        </div>
 
-        <div class="fieldset">
-          <div class="fieldset-title">기본 정보</div>
+        <details class="fieldset doc-info" ${d.name ? '' : 'open'}>
+          <summary>문서 정보 <span class="muted">이름 · 분류 · 색</span></summary>
           <div class="row2">
-            <div class="field"><label for="f-name">이름 *</label>
+            <div class="field"><label for="f-name">${isDoc ? '문서 제목' : '이름'} *</label>
               <input type="text" id="f-name" data-path="name" value="${esc(d.name)}" required></div>
-            <div class="field"><label for="f-sub">부제 / 영문명</label>
+            <div class="field"><label for="f-sub">${isDoc ? '부제' : '부제 / 영문명'}</label>
               <input type="text" id="f-sub" data-path="subname" value="${esc(d.subname)}"></div>
           </div>
           <div class="row2">
-            <div class="field"><label for="f-world">세계관 / 작품</label>
+            <div class="field"><label for="f-world">세계관 / 작품 <span class="muted">(분류)</span></label>
               <input type="text" id="f-world" data-path="world" value="${esc(d.world)}" list="world-list">
               <datalist id="world-list">${[...new Set(db().characters.map((c) => c.world).filter(Boolean))].map((w) => `<option value="${esc(w)}">`).join('')}</datalist></div>
             <div class="field"><label for="f-color">테마 색</label>
               <input type="color" id="f-color" data-path="color" value="${esc(safeColor(d.color))}"></div>
           </div>
-          <div class="field"><label for="f-summary">한 줄 소개</label>
-            <input type="text" id="f-summary" data-path="summary" value="${esc(d.summary)}"></div>
-          <div class="field"><label for="f-tags">태그</label>
+          <div class="field"><label for="f-tags">태그 <span class="muted">(분류)</span></label>
             <input type="text" id="f-tags" data-path="tagsText" value="${esc(d.tagsText)}" placeholder="쉼표로 구분 (예: 인간, 마법사, 주인공)"></div>
+          <div class="field"><label for="f-summary">한 줄 소개 <span class="muted">(목록 카드에 보여요)</span></label>
+            <input type="text" id="f-summary" data-path="summary" value="${esc(d.summary)}"></div>
+        </details>
+
+        <div class="wiki-head"><h1 id="ed-title">${esc(d.name || (isDoc ? '문서 제목' : '이름'))}</h1></div>
+
+        <div class="notices-edit">
+          ${d.notices.map((n, i) => `
+            <div class="wiki-notice">
+              <select data-path="notices.${i}.icon" aria-label="아이콘">${NOTICE_ICONS.map((ic) => `<option ${ic === n.icon ? 'selected' : ''}>${ic}</option>`).join('')}</select>
+              <div class="grow" contenteditable="true" data-html="notices.${i}.text" data-placeholder="안내 문구 (예: 이 문서에는 스포일러가 있어요)">${cleanHtml(n.text, 'view')}</div>
+              <button type="button" class="x" data-act="del" data-list="notices" data-i="${i}" aria-label="경고문 삭제">×</button>
+            </div>`).join('')}
+          <button type="button" class="btn btn-sm" data-act="add" data-list="notices">+ 경고문</button>
         </div>
+
+        <div class="wiki-top">
+          <nav class="wiki-toc"><div class="toc-h">목차</div>${tocHtml(d.chapters, '') || '<p class="muted">챕터를 추가하면 자동으로 만들어져요</p>'}</nav>
+          <aside class="infobox">
+            <div class="ib-title"><span id="ib-name">${esc(d.name || '이름')}</span><small id="ib-sub">${esc(d.subname)}</small></div>
+            <div class="ib-img ${cover ? '' : 'empty'}">${cover ? `<img src="${esc(imgUrl(cover))}" alt="">` : '<span>아래 [그림]에서 그림을 올리면 여기 보여요</span>'}</div>
+            <table><tbody>${d.profile.map((r, i) => (r.type === 'head'
+              ? `<tr><th colspan="2" class="ib-group" contenteditable="true" data-text="profile.${i}.label" data-placeholder="묶음 제목">${esc(r.label)}</th>
+                 <td class="row-x"><button type="button" class="x" data-act="del" data-list="profile" data-i="${i}" aria-label="삭제">×</button></td></tr>`
+              : `<tr><th contenteditable="true" data-text="profile.${i}.label" data-placeholder="항목">${esc(r.label)}</th>
+                 <td contenteditable="true" data-html="profile.${i}.value" data-placeholder="내용">${cleanHtml(r.value, 'view')}</td>
+                 <td class="row-x"><button type="button" class="x" data-act="del" data-list="profile" data-i="${i}" aria-label="삭제">×</button></td></tr>`)).join('')}
+            </tbody></table>
+            <div class="ib-add">
+              <button type="button" class="btn btn-sm" data-act="add" data-list="profile">+ 항목</button>
+              <button type="button" class="btn btn-sm" data-act="add-head">+ 묶음 제목</button>
+            </div>
+          </aside>
+        </div>
+
+        ${chaptersHtml(d.chapters, '', '', true)}
+        <button type="button" class="btn btn-sm add-ch" data-ch-act="add-top">+ 챕터 추가</button>
+        <p class="hint">빈 항목과 빈 챕터는 저장할 때 빠져요. 내용이 비어도 제목이 있는 챕터는 남아요.</p>
 
         <div class="fieldset">
           <div class="fieldset-title">그림</div>
           ${imagesFieldHtml(d, true)}
-        </div>
-
-        <div class="fieldset">
-          <div class="fieldset-title">프로필</div>
-          <div class="rows">
-            ${d.profile.map((p, i) => `
-              <div class="kv-row">
-                <input type="text" data-path="profile.${i}.label" value="${esc(p.label)}" placeholder="항목 (예: 나이)">
-                <input type="text" data-path="profile.${i}.value" value="${esc(p.value)}" placeholder="내용">
-                <button type="button" class="btn btn-icon btn-danger" data-act="del" data-list="profile" data-i="${i}" aria-label="삭제">×</button>
-              </div>`).join('')}
-          </div>
-          <button type="button" class="btn btn-sm" data-act="add" data-list="profile">+ 항목 추가</button>
-          <div class="hint">내용을 비워 둔 항목은 저장할 때 빠져요.</div>
-        </div>
-
-        <div class="fieldset">
-          <div class="fieldset-title">설정 / 서술</div>
-          <div class="rows">
-            ${d.sections.map((s, i) => `
-              <div class="sec-row">
-                <div class="head">
-                  <input type="text" data-path="sections.${i}.title" value="${esc(s.title)}" placeholder="제목 (예: 성격, 배경, 능력)">
-                  <button type="button" class="btn btn-icon" data-act="up" data-list="sections" data-i="${i}" aria-label="위로">↑</button>
-                  <button type="button" class="btn btn-icon" data-act="down" data-list="sections" data-i="${i}" aria-label="아래로">↓</button>
-                  <button type="button" class="btn btn-icon btn-danger" data-act="del" data-list="sections" data-i="${i}" aria-label="삭제">×</button>
-                </div>
-                <textarea data-path="sections.${i}.body" rows="5" placeholder="내용">${esc(s.body)}</textarea>
-              </div>`).join('')}
-          </div>
-          <button type="button" class="btn btn-sm" data-act="add" data-list="sections">+ 항목 추가</button>
         </div>
 
         <div class="fieldset">
@@ -948,7 +1182,7 @@
           </div>
           <datalist id="char-list">${others.map((c) => `<option value="${esc(c.name)}">`).join('')}</datalist>
           <button type="button" class="btn btn-sm" data-act="add" data-list="relations">+ 관계 추가</button>
-          <div class="hint">친구 자캐도 이름을 넣으면 그 캐릭터 페이지로 연결돼요.</div>
+          <div class="hint">친구 자캐도 이름을 넣으면 그 페이지로 연결돼요.</div>
         </div>
 
         <div class="form-actions">
@@ -959,21 +1193,83 @@
 
     window.scrollTo(0, scrollY);
     const $form = document.getElementById('editor');
-    bindEditor($form, d, () => drawCharEditor(id), (list) => (list === 'profile' ? { label: '', value: '' }
-      : list === 'sections' ? { title: '', body: '' }
+    $form.querySelectorAll('sup.fn').forEach((s) => { s.contentEditable = 'false'; });
+
+    // 구조가 바뀌기 전에 화면에서 고친 내용을 먼저 데이터에 옮겨요 (순서가 바뀌면 엉뚱한 칸에 들어가니까)
+    const sync = () => {
+      $form.querySelectorAll('[data-html]').forEach((el) => setPath(d, el.dataset.html, el.innerHTML));
+      $form.querySelectorAll('[data-text]').forEach((el) => setPath(d, el.dataset.text, el.textContent.replace(/\s+/g, ' ').trim()));
+    };
+    $form.addEventListener('click', (e) => { if (e.target.closest('[data-act], [data-ch-act]')) sync(); }, true);
+    $form.addEventListener('change', (e) => { if (e.target.id === 'img-file') sync(); }, true);
+
+    const redraw = () => drawCharEditor(id);
+    bindEditor($form, d, redraw, (list) => (list === 'profile' ? { type: 'row', label: '', value: '' }
+      : list === 'notices' ? { icon: '⚠️', text: '' }
       : { id: '', name: '', type: '', note: '' }));
+
+    $form.addEventListener('input', (e) => {
+      if (e.target.id === 'f-name') {
+        document.getElementById('ib-name').textContent = e.target.value || '이름';
+        document.getElementById('ed-title').textContent = e.target.value || (isDoc ? '문서 제목' : '이름');
+      }
+      if (e.target.id === 'f-sub') document.getElementById('ib-sub').textContent = e.target.value;
+      if (e.target.id === 'f-color') $form.style.setProperty('--oc', safeColor(e.target.value));
+    });
+
+    $form.addEventListener('click', (e) => {
+      if (e.target.closest('[data-act="add-head"]')) {
+        d.profile.push({ type: 'head', label: '', value: '' });
+        return redraw();
+      }
+      const b = e.target.closest('[data-ch-act]');
+      if (b) { chapterAction(d, b.dataset.chAct, b.dataset.ch); redraw(); return; }
+      const fn = e.target.closest('[data-html] sup.fn');
+      if (fn) {
+        const v = prompt('각주 내용 (비우면 각주를 지워요)', fn.getAttribute('data-note') || '');
+        if (v === null) return;
+        if (v.trim()) fn.setAttribute('data-note', v.trim()); else fn.remove();
+      }
+    });
+
+    // 제목·항목 이름 칸: 줄바꿈 없이 글자만
+    $form.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' && e.target.closest && e.target.closest('[data-text]')) e.preventDefault();
+    });
+    $form.addEventListener('paste', (e) => {
+      if (!e.target.closest || !e.target.closest('[data-text]')) return;
+      e.preventDefault();
+      document.execCommand('insertText', false, (e.clipboardData.getData('text/plain') || '').replace(/\s+/g, ' '));
+    });
+
+    bindToolbar($form, d);
 
     $form.addEventListener('submit', async (e) => {
       e.preventDefault();
+      sync();
       const name = d.name.trim();
-      if (!name) return toast('이름을 입력해 주세요');
+      if (!name) {
+        $form.querySelector('.doc-info').open = true;
+        document.getElementById('f-name').focus();
+        return toast('이름을 입력해 주세요');
+      }
+      const files = [];
+      const clean = (h) => (isBlankHtml(h) ? '' : cleanHtml(h, 'store', files));
+      const cleanChapters = (list) => list.map((ch) => ({
+        id: ch.id, title: ch.title.trim(), body: clean(ch.body), children: cleanChapters(ch.children),
+      })).filter((ch) => ch.title || ch.body || ch.children.length);
       const c = normalizeChar({
         ...d,
+        doc: 3,
         name,
         owner: d.owner || state.user.login,
         tags: [...new Set(d.tagsText.split(',').map((t) => t.trim().replace(/^#/, '')).filter(Boolean))],
-        profile: d.profile.filter((p) => p.value.trim()),
-        sections: d.sections.filter((s) => s.body.trim()),
+        notices: d.notices.map((n) => ({ icon: n.icon, text: clean(n.text) })).filter((n) => n.text),
+        profile: d.profile.map((r) => (r.type === 'head'
+          ? { type: 'head', label: r.label.trim(), value: '' }
+          : { type: 'row', label: r.label.trim(), value: clean(r.value) }))
+          .filter((r) => (r.type === 'head' ? r.label : r.value)),
+        chapters: cleanChapters(d.chapters),
         relations: d.relations.filter((r) => r.name.trim()).map((r) => {
           const t = db().characters.find((x) => x.name === r.name.trim() && x.id !== d.id);
           return { ...r, name: r.name.trim(), id: t ? t.id : '' };
@@ -981,12 +1277,17 @@
         updatedAt: new Date().toISOString(),
       });
       if (!c.images.some((img) => img.src === c.avatar)) c.avatar = '';
+      const json = JSON.stringify(c);
+      Object.entries(d._files).forEach(([path, base64]) => {
+        if (json.includes(path) && !files.some((f) => f.path === path)) files.push({ path, base64 });
+      });
       $form.querySelector('[type=submit]').disabled = true;
-      const ok = await trySave(`${id ? '캐릭터 수정' : '캐릭터 추가'}: ${c.name}`, (next) => {
+      const what = c.kind === 'doc' ? '문서' : '캐릭터';
+      const ok = await trySave(`${what} ${id ? '수정' : '추가'}: ${c.name}`, (next) => {
         const idx = next.characters.findIndex((x) => x.id === c.id);
         if (idx >= 0) next.characters[idx] = { ...c, createdAt: next.characters[idx].createdAt };
         else next.characters.push(c);
-      }, pendingFiles(d));
+      }, files);
       if (ok) {
         state.draft = null;
         toast('저장했어요');
@@ -994,6 +1295,156 @@
       } else {
         $form.querySelector('[type=submit]').disabled = false;
       }
+    });
+  }
+
+  function chapterAction(d, act, idxStr) {
+    const blank = () => ({ id: uid('ch'), title: '', body: '', children: [] });
+    if (act === 'add-top') { d.chapters.push(blank()); return; }
+    const idx = idxStr.split('.').map(Number);
+    let list = d.chapters;
+    let parent = null;
+    for (let k = 0; k < idx.length - 1; k++) { parent = { list, i: idx[k] }; list = list[idx[k]].children; }
+    const i = idx[idx.length - 1];
+    if (act === 'up' && i > 0) [list[i - 1], list[i]] = [list[i], list[i - 1]];
+    else if (act === 'down' && i < list.length - 1) [list[i + 1], list[i]] = [list[i], list[i + 1]];
+    else if (act === 'in' && i > 0) list[i - 1].children.push(...list.splice(i, 1));
+    else if (act === 'out' && parent) parent.list.splice(parent.i + 1, 0, ...list.splice(i, 1));
+    else if (act === 'child') list[i].children.push(blank());
+    else if (act === 'del') {
+      const ch = list[i];
+      const has = ch.title || !isBlankHtml(ch.body) || ch.children.length;
+      if (!has || confirm(`'${ch.title || '제목 없는 챕터'}'${ch.children.length ? '와 하위 챕터' : ''}를 지울까요?`)) list.splice(i, 1);
+    }
+  }
+
+  function bindToolbar($form, d) {
+    const $tb = $form.querySelector('#wtb');
+    const $tableBar = $tb.querySelector('.tb-table');
+    let range = null;
+    const elOf = (n) => (n && n.nodeType === 1 ? n : n && n.parentElement);
+    const editableOf = (n) => { const el = elOf(n); return el && el.closest('[data-html]'); };
+    const cellOf = () => {
+      const ed = range && editableOf(range.startContainer);
+      const cell = ed && elOf(range.startContainer).closest('td, th');
+      return cell && cell !== ed && ed.contains(cell) ? cell : null;
+    };
+
+    const onSel = () => {
+      if (!document.body.contains($form)) { document.removeEventListener('selectionchange', onSel); return; }
+      const sel = getSelection();
+      if (!sel.rangeCount || !$form.contains(sel.anchorNode) || !editableOf(sel.anchorNode)) return;
+      range = sel.getRangeAt(0).cloneRange();
+      $tableBar.hidden = !cellOf();
+    };
+    document.addEventListener('selectionchange', onSel);
+
+    const restore = () => {
+      if (!range || !document.body.contains(range.startContainer)) { toast('먼저 문서에서 글자를 쓸 곳을 눌러 주세요'); return false; }
+      const sel = getSelection();
+      sel.removeAllRanges();
+      sel.addRange(range);
+      return true;
+    };
+    const exec = (cmd, val) => {
+      if (!restore()) return;
+      document.execCommand('styleWithCSS', false, true);
+      document.execCommand(cmd, false, val);
+    };
+    const insert = (html) => { if (restore()) document.execCommand('insertHTML', false, html); };
+
+    $tb.addEventListener('mousedown', (e) => { if (e.target.closest('button')) e.preventDefault(); });
+    $tb.addEventListener('click', (e) => {
+      const b = e.target.closest('[data-cmd]');
+      if (!b) return;
+      const cmd = b.dataset.cmd;
+      if (cmd === 'link') {
+        const v = (prompt('링크할 주소(https://…) 또는 이 사이트의 문서·캐릭터 이름') || '').trim();
+        if (!v) return;
+        let href = v;
+        if (!/^https?:\/\//i.test(v)) {
+          const t = db().characters.find((x) => x.name === v);
+          if (!t) return alert(`'${v}' 문서를 찾지 못했어요.\n바깥 주소는 https:// 로 시작해야 해요.`);
+          href = '#/oc/' + encId(t.id);
+        }
+        if (range && !range.collapsed) exec('createLink', href);
+        else insert(`<a href="${esc(href)}">${esc(v)}</a>`);
+      } else if (cmd === 'table') {
+        insert('<table><tbody><tr><th>제목</th><th>제목</th></tr><tr><td>내용</td><td>내용</td></tr></tbody></table><p><br></p>');
+      } else if (cmd === 'quote') {
+        exec('formatBlock', '<blockquote>');
+      } else if (cmd === 'fn') {
+        if (!range) return restore();
+        const note = (prompt('각주 내용') || '').trim();
+        if (note) insert(`<sup class="fn" data-note="${esc(note)}" contenteditable="false">*</sup>&#8203;`);
+      } else if (cmd === 'spoiler') {
+        if (!restore()) return;
+        const sel = getSelection();
+        if (sel.isCollapsed) return toast('가릴 글자를 먼저 골라 주세요');
+        const r = sel.getRangeAt(0);
+        const span = document.createElement('span');
+        span.className = 'spoiler';
+        span.appendChild(r.extractContents());
+        r.insertNode(span);
+      } else if (cmd === 'hr') {
+        exec('insertHorizontalRule');
+      } else if (cmd === 'clear') {
+        exec('removeFormat');
+        document.execCommand('unlink');
+      } else if (/^(row|col)[+-]$/.test(cmd)) {
+        const cell = cellOf();
+        if (!cell) return;
+        const tr = cell.parentElement;
+        const table = cell.closest('table');
+        const ci = cell.cellIndex;
+        const blankCell = (tag) => { const x = document.createElement(tag); x.innerHTML = '<br>'; return x; };
+        if (cmd === 'row+') {
+          const nr = document.createElement('tr');
+          [...tr.cells].forEach(() => nr.appendChild(blankCell('td')));
+          tr.after(nr);
+        } else if (cmd === 'row-') {
+          if (table.rows.length > 1) tr.remove(); else table.remove();
+        } else if (cmd === 'col+') {
+          [...table.rows].forEach((row) => {
+            const ref = row.cells[ci];
+            const n = blankCell(ref && ref.tagName === 'TH' ? 'th' : 'td');
+            if (ref) ref.after(n); else row.appendChild(n);
+          });
+        } else if (cmd === 'col-') {
+          if (tr.cells.length <= 1) table.remove();
+          else [...table.rows].forEach((row) => { if (row.cells[ci]) row.cells[ci].remove(); });
+        }
+        range = null;
+        $tableBar.hidden = true;
+      } else {
+        exec(cmd);
+      }
+    });
+
+    $tb.querySelectorAll('[data-color]').forEach((inp) => inp.addEventListener('change', () => exec(inp.dataset.color, inp.value)));
+    $tb.querySelector('[data-size]').addEventListener('change', (e) => {
+      if (e.target.value) exec('fontSize', e.target.value);
+      e.target.value = '';
+    });
+    $tb.querySelector('[data-body-img]').addEventListener('change', async (e) => {
+      const files = [...e.target.files];
+      e.target.value = '';
+      if (!files.length || !range) { if (!range) toast('먼저 그림을 넣을 곳을 눌러 주세요'); return; }
+      const t = toast('그림 준비 중…', 0);
+      let html = '';
+      for (const file of files) {
+        try {
+          const url = await fileToDataUrl(file);
+          const f = dataUrlToFile(url);
+          if (!f) throw new Error('형식');
+          d._files[f.path] = f.base64;
+          html += `<img data-src="${esc(f.path)}" src="${url}" alt="">`;
+        } catch (err) {
+          alert(`'${file.name}'을(를) 불러오지 못했어요.`);
+        }
+      }
+      t.remove();
+      if (html) insert(html);
     });
   }
 
@@ -1436,13 +1887,14 @@
     document.title = db().siteTitle;
 
     if (page === 'oc' && id) renderDetail(id);
-    else if (page === 'edit' && id) renderCharEditor(id);
-    else if (page === 'new') renderCharEditor('');
+    else if (page === 'edit' && id) renderCharEditor(id, query);
+    else if (page === 'new') renderCharEditor('', query);
     else if (page === 'posts') renderPosts();
     else if (page === 'post' && id) renderPost(id);
     else if (page === 'write') renderPostEditor(id, query);
     else if (page === 'me' || page === 'backup') renderMe();
-    else renderCharacters();
+    else if (page === 'docs') renderCharacters('doc');
+    else renderCharacters('oc');
     if (!isEditing(page)) window.scrollTo(0, 0);
   }
 
@@ -1453,6 +1905,11 @@
     const y = window.scrollY;
     try { await loadDb(); route(); window.scrollTo(0, y); } catch (e) { /* 다음에 다시 */ }
   });
+
+  // 편집 도구모음이 상단 바 바로 아래에 붙도록 상단 바 높이를 알려 줘요
+  const setTopbarHeight = () => document.documentElement.style.setProperty('--topbar-h', document.querySelector('.topbar').offsetHeight + 'px');
+  window.addEventListener('resize', setTopbarHeight);
+  setTopbarHeight();
 
   (async function init() {
     await restoreSession();
