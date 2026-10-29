@@ -121,7 +121,7 @@ img { max-width: 100%; display: block; }
 .btn-icon { width: 36px; padding: 7px 0; }
 .btn-sm { padding: 4px 10px; font-size: 13px; }
 
-input[type="text"], input[type="url"], input[type="search"], textarea, select {
+input[type="text"], input[type="url"], input[type="search"], input[type="password"], textarea, select {
   width: 100%;
   padding: 8px 12px;
   border: 1px solid var(--border);
@@ -418,7 +418,7 @@ input[type="color"] { width: 48px; height: 38px; border: 1px solid var(--border)
 }
 .tabs a.active { background: var(--surface-2); color: var(--text); }
 #me-btn.logged { padding: 4px 12px 4px 4px; }
-#me-btn .avatar { width: 26px; height: 26px; }
+#me-btn .avatar { width: 26px; height: 26px; font-size: 13px; }
 .me-name { max-width: 90px; overflow: hidden; text-overflow: ellipsis; }
 @media (max-width: 560px) {
   .topbar { flex-wrap: wrap; row-gap: 6px; }
@@ -432,18 +432,23 @@ input[type="color"] { width: 48px; height: 38px; border: 1px solid var(--border)
   width: 20px;
   height: 20px;
   border-radius: 50%;
-  background: var(--surface-2);
+  background: var(--muted);
   flex: none;
-  display: inline-block;
-  object-fit: cover;
+  display: inline-grid;
+  place-items: center;
+  color: #fff;
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1;
+  overflow: hidden;
 }
-.avatar-lg { width: 34px; height: 34px; }
-.avatar-xl { width: 56px; height: 56px; }
+.avatar-lg { width: 34px; height: 34px; font-size: 15px; }
+.avatar-xl { width: 56px; height: 56px; font-size: 24px; }
 .byline { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; color: var(--muted); }
 .byline .dot { opacity: .6; }
 .owner-line { margin-top: 6px; font-size: 13px; color: var(--muted); }
 .card-owner { display: flex; align-items: center; gap: 5px; margin-top: 8px; font-size: 12px; color: var(--muted); }
-.card-owner .avatar { width: 16px; height: 16px; }
+.card-owner .avatar { width: 16px; height: 16px; font-size: 9px; }
 .chip-person { display: inline-flex; align-items: center; gap: 6px; padding-left: 4px; }
 .chip-person .avatar { width: 20px; height: 20px; }
 .chips-tags { margin-top: -6px; }
@@ -540,3 +545,6 @@ a.relation:hover strong { text-decoration: underline; }
 .steps a { color: var(--accent); font-weight: 700; }
 .fieldset.highlight { border-color: var(--accent); }
 .backup-grid .field input { margin-bottom: 0; }
+.user-list { display: grid; gap: 8px; margin-bottom: 14px; }
+.user-row { display: flex; align-items: center; gap: 8px; font-size: 14px; }
+.user-row .link-btn { margin-left: auto; }
