@@ -6,7 +6,9 @@
   const REPO = `/repos/${CFG.owner}/${CFG.repo}`;
   const RAW = `https://raw.githubusercontent.com/${CFG.owner}/${CFG.repo}/${CFG.branch}/`;
   const DB_PATH = 'data/db.json';
-  const TOKEN_KEY = 'oc-backup-token';
+  const ACC_PATH = 'data/accounts.json';
+  const SESSION_KEY = 'oc-backup-session';
+  const PBKDF2_ITER = 310000;
   const MAX_IMAGE_SIDE = 1600;
 
   const $app = document.getElementById('app');
@@ -17,7 +19,9 @@
     db: null,
     loadedAt: 0,
     token: '',
-    user: null,         // { login, avatar }
+    user: null,         // { login, admin }
+    key: null,          // 계정 공용 키 (토큰을 여는 열쇠)
+    accounts: null,     // data/accounts.json
     filter: { q: '', world: '', tag: '', owner: '' },
     postFilter: { owner: '' },
     draft: null,
@@ -52,7 +56,7 @@
   const coverOf = (c) => (c.avatar && c.images.some((i) => i.src === c.avatar) ? c.avatar : (c.images[0] && c.images[0].src) || '');
   const initialOf = (c) => esc((c.name || '?').trim().charAt(0) || '?');
   const memberName = (login) => (login && db().members[login] && db().members[login].name) || login || '알 수 없음';
-  const isMine = (owner) => !!state.user && (!owner || owner === state.user.login);
+  const isMine = (owner) => !!state.user && (state.user.admin || !owner || owner === state.user.login);
   const encId = encodeURIComponent;
 
   function thumbHtml(c) {
@@ -63,7 +67,9 @@
   }
   function avatarHtml(login, cls) {
     if (!login) return '';
-    return `<img class="avatar ${cls || ''}" src="https://github.com/${encId(login)}.png?size=64" alt="" loading="lazy">`;
+    let h = 0;
+    for (const ch of login) h = (h * 31 + ch.codePointAt(0)) % 360;
+    return `<span class="avatar ${cls || ''}" style="background:hsl(${h} 50% 55%)" aria-hidden="true">${esc([...memberName(login)][0] || '?')}</span>`;
   }
   function byline(login, iso) {
     return `<span class="byline">${avatarHtml(login)}<span>${esc(memberName(login))}</span>${iso ? `<span class="dot">·</span><time>${esc(fmtDate(iso))}</time>` : ''}</span>`;
@@ -180,18 +186,20 @@
     return res.status === 204 ? null : res.json();
   }
 
-  async function readDbAt(ref) {
+  // 저장소의 JSON 파일을 읽어요. 없으면 null.
+  async function readJsonAt(path, ref) {
     let meta;
     try {
-      meta = await gh('GET', `${REPO}/contents/${DB_PATH}?ref=${encId(ref)}`);
+      meta = await gh('GET', `${REPO}/contents/${path}?ref=${encId(ref)}`);
     } catch (err) {
-      if (err.status === 404) return normalizeDb({});
+      if (err.status === 404) return null;
       throw err;
     }
-    if (meta.content && meta.encoding === 'base64') return normalizeDb(JSON.parse(b64ToUtf8(meta.content)));
+    if (meta.content && meta.encoding === 'base64') return JSON.parse(b64ToUtf8(meta.content));
     const blob = await gh('GET', `${REPO}/git/blobs/${meta.sha}`); // 1MB가 넘으면 contents API가 내용을 비워서 줌
-    return normalizeDb(JSON.parse(b64ToUtf8(blob.content)));
+    return JSON.parse(b64ToUtf8(blob.content));
   }
+  const readDbAt = async (ref) => normalizeDb(await readJsonAt(DB_PATH, ref));
 
   async function loadDb() {
     if (state.token) {
@@ -205,8 +213,7 @@
   }
 
   // 변경 하나 = 커밋 하나. 그 사이 친구가 먼저 저장했으면 최신 데이터에 다시 적용해서 재시도해요.
-  async function save(message, mutate, files) {
-    if (!state.user) throw new Error('로그인이 필요해요');
+  async function commitJson(path, normalize, message, mutate, files) {
     if (state.busy) throw new Error('저장 중이에요. 잠시 후 다시 시도해 주세요.');
     state.busy = true;
     const t = toast('저장 중…', 0);
@@ -220,15 +227,15 @@
         const ref = await gh('GET', `${REPO}/git/ref/heads/${encId(CFG.branch)}`);
         const head = ref.object.sha;
         const commit = await gh('GET', `${REPO}/git/commits/${head}`);
-        const next = await readDbAt(head);
+        const next = normalize(await readJsonAt(path, head));
         mutate(next);
         const dbBlob = await gh('POST', `${REPO}/git/blobs`, { content: JSON.stringify(next, null, 1) + '\n', encoding: 'utf-8' });
         const tree = await gh('POST', `${REPO}/git/trees`, {
           base_tree: commit.tree.sha,
-          tree: [{ path: DB_PATH, mode: '100644', type: 'blob', sha: dbBlob.sha }, ...blobs],
+          tree: [{ path, mode: '100644', type: 'blob', sha: dbBlob.sha }, ...blobs],
         });
         const created = await gh('POST', `${REPO}/git/commits`, {
-          message: `${message} (by ${state.user.login})`,
+          message: state.user ? `${message} (by ${state.user.login})` : message,
           tree: tree.sha,
           parents: [head],
         });
@@ -238,8 +245,6 @@
           if (err.status === 422 || err.status === 409) continue;
           throw err;
         }
-        state.db = next;
-        state.loadedAt = Date.now();
         return next;
       }
       throw new Error('친구와 동시에 저장하느라 실패했어요. 다시 시도해 주세요.');
@@ -249,38 +254,153 @@
     }
   }
 
+  async function save(message, mutate, files) {
+    if (!state.user) throw new Error('로그인이 필요해요');
+    state.db = await commitJson(DB_PATH, normalizeDb, message, mutate, files);
+    state.loadedAt = Date.now();
+  }
+
   async function trySave(message, mutate, files) {
     try {
       await save(message, mutate, files);
       return true;
     } catch (err) {
-      alert('저장하지 못했어요.\n' + err.message + (err.status === 401 ? '\n\n토큰이 만료됐을 수 있어요. [내 정보]에서 다시 로그인해 주세요.' : ''));
+      alert('저장하지 못했어요.\n' + err.message + (err.status === 401 || err.status === 403 ? '\n\nGitHub 토큰이 만료됐거나 권한이 부족할 수 있어요. 저장소 주인이 [내 정보 → 토큰 교체]에서 새 토큰을 넣어 주세요.' : ''));
       return false;
     }
   }
 
-  async function login(token) {
-    state.token = token;
-    try {
-      const u = await gh('GET', '/user');
-      const r = await gh('GET', REPO);
-      if (!r.permissions || !r.permissions.push) {
-        const err = new Error(`'${u.login}' 계정은 이 저장소에 쓰기 권한이 없어요. 저장소 주인(${CFG.owner})에게 Collaborator 초대를 받고 수락해 주세요.`);
-        err.status = 403;
-        throw err;
-      }
-      state.user = { login: u.login, avatar: u.avatar_url };
-      try { localStorage.setItem(TOKEN_KEY, token); } catch (e) { /* ignore */ }
-    } catch (err) {
-      state.token = '';
-      state.user = null;
-      throw err;
-    }
+  // ---------- accounts (아이디/비밀번호) ----------
+  // GitHub 토큰은 공용 키로 암호화해서 data/accounts.json에 두고, 공용 키는 계정마다
+  // 그 사람 비밀번호로 한 번 더 암호화해 둬요. 비밀번호를 알아야만 토큰을 꺼낼 수 있어요.
+  const utf8 = new TextEncoder();
+  const toB64 = (buf) => { let s = ''; new Uint8Array(buf).forEach((b) => { s += String.fromCharCode(b); }); return btoa(s); };
+  const fromB64 = (b64) => Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
+  const randBytes = (n) => crypto.getRandomValues(new Uint8Array(n));
+
+  async function passwordKey(password, salt, iter) {
+    const base = await crypto.subtle.importKey('raw', utf8.encode(password), 'PBKDF2', false, ['deriveKey']);
+    return crypto.subtle.deriveKey({ name: 'PBKDF2', salt, iterations: iter, hash: 'SHA-256' }, base,
+      { name: 'AES-GCM', length: 256 }, false, ['encrypt', 'decrypt']);
   }
+  const aesKey = (raw) => crypto.subtle.importKey('raw', raw, 'AES-GCM', false, ['encrypt', 'decrypt']);
+  async function seal(key, bytes) {
+    const iv = randBytes(12);
+    return { iv: toB64(iv), ct: toB64(await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, key, bytes)) };
+  }
+  async function unseal(key, box) {
+    return new Uint8Array(await crypto.subtle.decrypt({ name: 'AES-GCM', iv: fromB64(box.iv) }, key, fromB64(box.ct)));
+  }
+  async function wrapKey(rawKey, password) {
+    const salt = randBytes(16);
+    const box = await seal(await passwordKey(password, salt, PBKDF2_ITER), rawKey);
+    return { salt: toB64(salt), iter: PBKDF2_ITER, iv: box.iv, ct: box.ct };
+  }
+
+  function normalizeAccounts(a) {
+    a = a && typeof a === 'object' ? a : {};
+    return { version: 1, token: a.token || null, users: a.users && typeof a.users === 'object' ? a.users : {} };
+  }
+  // 사이트 파일을 먼저 보고, 방금 만든 계정이 아직 반영 전이면 GitHub에서 직접 읽어요.
+  async function fetchAccounts(needId) {
+    let acc = null;
+    try {
+      const res = await fetch(`${ACC_PATH}?t=${Date.now()}`, { cache: 'no-store' });
+      if (res.ok) acc = normalizeAccounts(await res.json());
+    } catch (e) { /* ignore */ }
+    if (!acc || !acc.token || (needId && !acc.users[needId])) {
+      try {
+        acc = normalizeAccounts(await readJsonAt(ACC_PATH, CFG.branch));
+      } catch (e) {
+        if (!acc) throw e;
+      }
+    }
+    return acc;
+  }
+
+  async function startSession(id, rawKey, acc) {
+    state.token = new TextDecoder().decode(await unseal(await aesKey(rawKey), acc.token));
+    state.key = rawKey;
+    state.accounts = acc;
+    state.user = { login: id, admin: !!acc.users[id].admin };
+    try { localStorage.setItem(SESSION_KEY, JSON.stringify({ id, key: toB64(rawKey) })); } catch (e) { /* ignore */ }
+  }
+
+  async function login(id, password) {
+    const acc = await fetchAccounts(id);
+    const u = acc.users[id];
+    if (!u || !acc.token) throw new Error('아이디나 비밀번호가 맞지 않아요.');
+    let rawKey;
+    try {
+      rawKey = await unseal(await passwordKey(password, fromB64(u.salt), u.iter || PBKDF2_ITER), u);
+    } catch (e) {
+      throw new Error('아이디나 비밀번호가 맞지 않아요.');
+    }
+    await startSession(id, rawKey, acc);
+  }
+
   function logout() {
     state.token = '';
+    state.key = null;
     state.user = null;
-    try { localStorage.removeItem(TOKEN_KEY); } catch (e) { /* ignore */ }
+    try { localStorage.removeItem(SESSION_KEY); } catch (e) { /* ignore */ }
+  }
+
+  async function restoreSession() {
+    let s = null;
+    try { s = JSON.parse(localStorage.getItem(SESSION_KEY) || 'null'); } catch (e) { /* ignore */ }
+    if (!s || !s.id || !s.key) return;
+    try {
+      const acc = await fetchAccounts(s.id);
+      if (!acc.users[s.id] || !acc.token) return logout(); // 삭제된 계정
+      await startSession(s.id, fromB64(s.key), acc);
+    } catch (e) {
+      // 키가 안 맞으면 로그아웃, 인터넷 문제면 이번만 보기 전용으로
+      if (e.name === 'OperationError') logout();
+      else { state.token = ''; state.user = null; }
+    }
+  }
+
+  async function checkToken(token) {
+    const saved = state.token;
+    state.token = token;
+    try {
+      const r = await gh('GET', REPO);
+      if (!r.permissions || !r.permissions.push) throw new Error('이 토큰으로는 저장소에 쓸 수 없어요.');
+    } catch (err) {
+      state.token = saved;
+      throw err.status === 401 ? new Error('토큰이 올바르지 않아요. 다시 복사해 주세요.') : err;
+    }
+  }
+
+  async function updateAccounts(message, mutate) {
+    state.accounts = await commitJson(ACC_PATH, normalizeAccounts, message, mutate);
+  }
+
+  // 처음 한 번: 토큰을 암호화해서 넣고 관리자 계정을 만들어요.
+  async function setupFirstAccount(token, id, password) {
+    await checkToken(token);
+    const rawKey = randBytes(32);
+    const tokenBox = await seal(await aesKey(rawKey), utf8.encode(token));
+    const entry = { ...(await wrapKey(rawKey, password)), admin: true, createdAt: new Date().toISOString() };
+    try {
+      await updateAccounts(`계정 설정: ${id}`, (a) => {
+        if (a.token) throw new Error('이미 설정돼 있어요. 만들어 둔 계정으로 로그인해 주세요.');
+        a.token = tokenBox;
+        a.users[id] = entry;
+      });
+    } catch (err) {
+      state.token = '';
+      throw err;
+    }
+    await startSession(id, rawKey, state.accounts);
+  }
+
+  function checkNewCredentials(id, pw, pw2) {
+    if (id !== undefined && (!id || id.length > 20 || /[\s/\\]/.test(id))) return '아이디는 띄어쓰기 없이 1~20자로 정해 주세요.';
+    if (pw.length < 8) return '비밀번호는 8자 이상으로 정해 주세요.';
+    if (pw2 !== undefined && pw !== pw2) return '비밀번호 확인이 맞지 않아요.';
+    return '';
   }
 
   // ---------- images ----------
@@ -958,40 +1078,56 @@
   // ---------- me / settings / backup ----------
   function renderMe() {
     renderChrome('');
-    const tokenUrl = 'https://github.com/settings/tokens/new?scopes=public_repo&description=' + encId('자캐 백업 사이트');
-    const myChars = state.user ? db().characters.filter((c) => c.owner === state.user.login).length : 0;
-    const myPosts = state.user ? db().posts.filter((p) => p.author === state.user.login).length : 0;
+    if (!state.user) return renderLogin();
+    const me = state.user.login;
+    const myChars = db().characters.filter((c) => c.owner === me).length;
+    const myPosts = db().posts.filter((p) => p.author === me).length;
+    const users = Object.keys((state.accounts && state.accounts.users) || {}).sort();
 
     $app.innerHTML = `
-      <div class="page-head"><h1>${state.user ? '내 정보' : '로그인'}</h1></div>
+      <div class="page-head"><h1>내 정보</h1></div>
       <div class="backup-grid">
-        ${state.user ? `
         <div class="fieldset">
           <div class="fieldset-title">계정</div>
-          <div class="me-row">${avatarHtml(state.user.login, 'avatar-xl')}
-            <div><strong>${esc(memberName(state.user.login))}</strong><br><span class="muted">@${esc(state.user.login)} · 캐릭터 ${myChars} · 게시물 ${myPosts}</span></div></div>
-          <div class="field" style="margin-top:14px"><label for="nick">사이트에서 보일 닉네임</label>
-            <input type="text" id="nick" value="${esc((db().members[state.user.login] || {}).name || '')}" placeholder="${esc(state.user.login)}"></div>
-          <div class="btns">
-            <button type="button" class="btn" id="save-nick">닉네임 저장</button>
-            <button type="button" class="btn btn-danger" id="logout">로그아웃</button>
-          </div>
-        </div>` : `
-        <div class="fieldset login-card">
-          <div class="fieldset-title">GitHub 토큰으로 로그인</div>
-          <ol class="steps">
-            <li>저장소 주인(<b>${esc(CFG.owner)}</b>)에게 Collaborator 초대를 받고, 메일이나 GitHub 알림에서 <b>수락</b>해요. (주인은 생략)</li>
-            <li><a href="${tokenUrl}" target="_blank" rel="noopener">여기를 눌러 토큰 만들기</a> → <b>Expiration</b>을 넉넉하게(예: 1년 또는 No expiration) 고르고, 맨 아래 <b>Generate token</b>.</li>
-            <li><code>ghp_</code>로 시작하는 토큰을 복사해서 아래에 붙여넣어요.</li>
-          </ol>
-          <form id="login-form">
-            <input type="password" id="token" placeholder="ghp_..." autocomplete="off" required>
-            <div class="btns" style="margin-top:10px"><button type="submit" class="btn btn-primary">로그인</button></div>
+          <div class="me-row">${avatarHtml(me, 'avatar-xl')}
+            <div><strong>${esc(me)}</strong>${state.user.admin ? ' <span class="tag">관리자</span>' : ''}<br>
+            <span class="muted">캐릭터 ${myChars} · 게시물 ${myPosts}</span></div></div>
+          <form id="pw-form" style="margin-top:14px">
+            <div class="field"><label for="new-pw">비밀번호 바꾸기</label>
+              <input type="password" id="new-pw" autocomplete="new-password" placeholder="새 비밀번호 (8자 이상)" required></div>
+            <div class="field"><input type="password" id="new-pw2" autocomplete="new-password" placeholder="새 비밀번호 확인" required></div>
+            <div class="btns">
+              <button type="submit" class="btn">비밀번호 바꾸기</button>
+              <button type="button" class="btn btn-danger" id="logout">로그아웃</button>
+            </div>
           </form>
-          <p class="hint">토큰은 이 기기 브라우저에만 저장돼요. 여러 사람이 쓰는 기기라면 다 쓴 뒤 로그아웃해 주세요. 기기마다 한 번씩 로그인하면 돼요.</p>
-        </div>`}
+        </div>
 
-        ${state.user && state.legacy && state.legacy.length ? `
+        ${state.user.admin ? `
+        <div class="fieldset">
+          <div class="fieldset-title">계정 관리</div>
+          <div class="user-list">${users.map((u) => `
+            <div class="user-row">${avatarHtml(u)}<span>${esc(u)}${state.accounts.users[u].admin ? ' <span class="muted">관리자</span>' : ''}</span>
+              ${u !== me ? `<button type="button" class="link-btn" data-del-user="${esc(u)}">삭제</button>` : ''}</div>`).join('')}</div>
+          <form id="add-user-form">
+            <div class="row2">
+              <input type="text" id="nu-id" placeholder="친구 아이디" autocomplete="off" required>
+              <input type="text" id="nu-pw" placeholder="비밀번호 (8자 이상)" autocomplete="off" required>
+            </div>
+            <div class="btns" style="margin-top:8px"><button type="submit" class="btn btn-primary">계정 만들기</button></div>
+          </form>
+          <p class="hint">만든 아이디와 비밀번호를 친구에게 알려 주세요. 친구는 로그인한 뒤 [내 정보]에서 비밀번호를 바꿀 수 있어요.</p>
+        </div>
+        <div class="fieldset">
+          <div class="fieldset-title">GitHub 토큰 교체</div>
+          <p>토큰이 만료돼서 저장이 안 될 때만 쓰면 돼요. 새 토큰을 넣으면 모든 계정이 그대로 새 토큰을 써요.</p>
+          <form id="token-form">
+            <input type="password" id="new-token" placeholder="github_pat_..." autocomplete="off" required>
+            <div class="btns" style="margin-top:8px"><button type="submit" class="btn">토큰 교체</button></div>
+          </form>
+        </div>` : ''}
+
+        ${state.legacy && state.legacy.length ? `
         <div class="fieldset highlight">
           <div class="fieldset-title">예전 데이터 옮기기</div>
           <p>이 브라우저에 예전 방식으로 저장된 캐릭터 ${state.legacy.length}명(${esc(state.legacy.map((c) => c.name).join(', '))})이 있어요. 공유 저장소에 내 캐릭터로 올릴까요?</p>
@@ -999,21 +1135,14 @@
             <button type="button" class="btn" id="drop-legacy">옮기지 않고 지우기</button></div>
         </div>` : ''}
 
-        <div class="fieldset">
-          <div class="fieldset-title">백업 받기</div>
-          <p>모든 데이터는 GitHub 저장소에 저장되고 고친 기록도 다 남아요. 따로 보관하고 싶으면:</p>
-          <div class="btns">
-            <button type="button" class="btn" id="export-json">글·설정만 (.json)</button>
-            <a class="btn" href="https://github.com/${encId(CFG.owner)}/${encId(CFG.repo)}/archive/refs/heads/${encId(CFG.branch)}.zip">그림까지 전부 (.zip)</a>
-          </div>
-        </div>
+        ${backupCardHtml()}
 
-        ${state.user ? `
         <div class="fieldset">
           <div class="fieldset-title">파일에서 캐릭터 불러오기</div>
           <p>예전에 이 사이트에서 내보낸 .json 백업 파일의 캐릭터를 내 캐릭터로 추가해요.</p>
           <div class="btns"><label class="btn">파일 고르기<input type="file" id="import" accept=".json,application/json" hidden></label></div>
         </div>
+        ${state.user.admin ? `
         <div class="fieldset">
           <div class="fieldset-title">사이트 제목</div>
           <div class="field"><input type="text" id="site-title-input" value="${esc(db().siteTitle)}"></div>
@@ -1022,40 +1151,71 @@
       </div>`;
 
     const on = (id, ev, fn) => { const el = document.getElementById(id); if (el) el.addEventListener(ev, fn); };
-
-    on('login-form', 'submit', async (e) => {
-      e.preventDefault();
-      const token = document.getElementById('token').value.trim();
-      const btn = e.target.querySelector('button');
+    const busy = async (btn, fn) => {
       btn.disabled = true;
-      try {
-        await login(token);
-        await loadDb();
-        toast(`${state.user.login}님 환영해요`);
-        renderMe();
-      } catch (err) {
-        alert(err.status === 401 ? '토큰이 올바르지 않아요. 다시 복사해 주세요.' : err.message);
-        btn.disabled = false;
-      }
-    });
+      try { await fn(); } catch (err) { alert(err.message); } finally { btn.disabled = false; }
+    };
+
     on('logout', 'click', async () => {
       if (!confirm('로그아웃할까요?')) return;
       logout();
-      await loadDb().catch(() => {});
       renderMe();
     });
-    on('save-nick', 'click', async () => {
-      const name = document.getElementById('nick').value.trim();
-      const me = state.user.login;
-      if (await trySave('닉네임 변경', (d) => { d.members[me] = { name }; })) { toast('저장했어요'); renderMe(); }
+    on('pw-form', 'submit', (e) => {
+      e.preventDefault();
+      const pw = document.getElementById('new-pw').value;
+      const problem = checkNewCredentials(undefined, pw, document.getElementById('new-pw2').value);
+      if (problem) return alert(problem);
+      busy(e.target.querySelector('[type=submit]'), async () => {
+        const wrapped = await wrapKey(state.key, pw);
+        await updateAccounts(`비밀번호 변경: ${me}`, (a) => {
+          if (!a.users[me]) throw new Error('계정을 찾을 수 없어요.');
+          a.users[me] = { ...a.users[me], ...wrapped };
+        });
+        toast('비밀번호를 바꿨어요');
+        renderMe();
+      });
+    });
+    on('add-user-form', 'submit', (e) => {
+      e.preventDefault();
+      const id = document.getElementById('nu-id').value.trim();
+      const pw = document.getElementById('nu-pw').value;
+      const problem = checkNewCredentials(id, pw);
+      if (problem) return alert(problem);
+      busy(e.target.querySelector('[type=submit]'), async () => {
+        const entry = { ...(await wrapKey(state.key, pw)), admin: false, createdAt: new Date().toISOString() };
+        await updateAccounts(`계정 추가: ${id}`, (a) => {
+          if (a.users[id]) throw new Error('이미 있는 아이디예요.');
+          a.users[id] = entry;
+        });
+        alert(`계정을 만들었어요.\n\n아이디: ${id}\n비밀번호: ${pw}\n\n친구에게 알려 주세요.`);
+        renderMe();
+      });
+    });
+    $app.querySelectorAll('[data-del-user]').forEach((b) => b.addEventListener('click', () => {
+      const id = b.dataset.delUser;
+      if (!confirm(`'${id}' 계정을 삭제할까요? 그 사람이 올린 글과 캐릭터는 남아 있어요.`)) return;
+      busy(b, async () => {
+        await updateAccounts(`계정 삭제: ${id}`, (a) => { delete a.users[id]; });
+        renderMe();
+      });
+    }));
+    on('token-form', 'submit', (e) => {
+      e.preventDefault();
+      const token = document.getElementById('new-token').value.trim();
+      busy(e.target.querySelector('[type=submit]'), async () => {
+        await checkToken(token);
+        const box = await seal(await aesKey(state.key), utf8.encode(token));
+        await updateAccounts('GitHub 토큰 교체', (a) => { a.token = box; });
+        toast('토큰을 바꿨어요');
+        renderMe();
+      });
     });
     on('save-title', 'click', async () => {
       const t = document.getElementById('site-title-input').value.trim() || '자캐 백업';
       if (await trySave('사이트 제목 변경', (d) => { d.siteTitle = t; })) { toast('저장했어요'); renderMe(); }
     });
-    on('export-json', 'click', () => {
-      download(`oc-backup-${today()}.json`, JSON.stringify({ ...db(), exportedAt: new Date().toISOString() }, null, 2));
-    });
+    on('export-json', 'click', exportJson);
     on('import', 'change', async (e) => {
       const file = e.target.files[0];
       if (!file) return;
@@ -1080,6 +1240,103 @@
       await clearLegacy();
       renderMe();
     });
+  }
+
+  function backupCardHtml() {
+    return `<div class="fieldset">
+      <div class="fieldset-title">백업 받기</div>
+      <p>모든 데이터는 GitHub 저장소에 저장되고 고친 기록도 다 남아요. 따로 보관하고 싶으면:</p>
+      <div class="btns">
+        <button type="button" class="btn" id="export-json">글·설정만 (.json)</button>
+        <a class="btn" href="https://github.com/${encId(CFG.owner)}/${encId(CFG.repo)}/archive/refs/heads/${encId(CFG.branch)}.zip">그림까지 전부 (.zip)</a>
+      </div>
+    </div>`;
+  }
+  function exportJson() {
+    download(`oc-backup-${today()}.json`, JSON.stringify({ ...db(), exportedAt: new Date().toISOString() }, null, 2));
+  }
+
+  function renderLogin() {
+    const ready = !!(state.accounts && state.accounts.token);
+    const patUrl = 'https://github.com/settings/personal-access-tokens/new?name=' + encId('자캐 백업') + '&contents=write';
+    $app.innerHTML = `
+      <div class="page-head"><h1>${ready ? '로그인' : '처음 설정'}</h1></div>
+      <div class="backup-grid">
+        ${ready ? `
+        <div class="fieldset login-card">
+          <form id="login-form">
+            <div class="field"><label for="login-id">아이디</label>
+              <input type="text" id="login-id" autocomplete="username" autocapitalize="off" required></div>
+            <div class="field"><label for="login-pw">비밀번호</label>
+              <input type="password" id="login-pw" autocomplete="current-password" required></div>
+            <div class="btns"><button type="submit" class="btn btn-primary">로그인</button></div>
+          </form>
+          <p class="hint">계정은 저장소 주인이 만들어 줘요. 한 번 로그인하면 이 기기에서는 계속 로그인돼 있어요.</p>
+        </div>` : `
+        <div class="fieldset login-card">
+          <div class="fieldset-title">저장소 주인(${esc(CFG.owner)})이 한 번만 하면 돼요</div>
+          <ol class="steps">
+            <li><a href="${patUrl}" target="_blank" rel="noopener">GitHub 토큰 만들기 페이지 열기</a></li>
+            <li><b>Expiration</b>: 가능한 길게 (만료되면 나중에 교체할 수 있어요)</li>
+            <li><b>Repository access</b>: <b>Only select repositories</b> → <b>${esc(CFG.repo)}</b></li>
+            <li><b>Permissions</b> → <b>Contents</b>를 <b>Read and write</b>로</li>
+            <li><b>Generate token</b> → <code>github_pat_</code>로 시작하는 토큰 복사</li>
+          </ol>
+          <form id="setup-form">
+            <div class="field"><label for="su-token">GitHub 토큰</label>
+              <input type="password" id="su-token" placeholder="github_pat_..." autocomplete="off" required></div>
+            <div class="field"><label for="su-id">내 아이디</label>
+              <input type="text" id="su-id" value="${esc(CFG.owner)}" autocapitalize="off" required></div>
+            <div class="row2">
+              <div class="field"><label for="su-pw">비밀번호 (8자 이상)</label>
+                <input type="password" id="su-pw" autocomplete="new-password" required></div>
+              <div class="field"><label for="su-pw2">비밀번호 확인</label>
+                <input type="password" id="su-pw2" autocomplete="new-password" required></div>
+            </div>
+            <div class="btns"><button type="submit" class="btn btn-primary">설정 완료</button></div>
+          </form>
+          <p class="hint">토큰은 비밀번호로 암호화해서 저장소에 저장돼요. 이후에는 아이디와 비밀번호로만 로그인하고, 친구 계정도 사이트에서 만들 수 있어요.</p>
+        </div>`}
+        ${backupCardHtml()}
+      </div>`;
+
+    const $login = document.getElementById('login-form');
+    if ($login) $login.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const btn = $login.querySelector('button');
+      btn.disabled = true;
+      btn.textContent = '확인 중…';
+      try {
+        await login(document.getElementById('login-id').value.trim(), document.getElementById('login-pw').value);
+        await loadDb();
+        toast(`${state.user.login}님 환영해요`);
+        location.hash = '#/';
+      } catch (err) {
+        alert(err.message);
+        btn.disabled = false;
+        btn.textContent = '로그인';
+      }
+    });
+    const $setup = document.getElementById('setup-form');
+    if ($setup) $setup.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const id = document.getElementById('su-id').value.trim();
+      const pw = document.getElementById('su-pw').value;
+      const problem = checkNewCredentials(id, pw, document.getElementById('su-pw2').value);
+      if (problem) return alert(problem);
+      const btn = $setup.querySelector('button');
+      btn.disabled = true;
+      try {
+        await setupFirstAccount(document.getElementById('su-token').value.trim(), id, pw);
+        await loadDb();
+        toast('설정을 마쳤어요');
+        renderMe();
+      } catch (err) {
+        alert(err.message);
+        btn.disabled = false;
+      }
+    });
+    document.getElementById('export-json').addEventListener('click', exportJson);
   }
 
   // 다른 곳에서 온 캐릭터를 내 캐릭터로 추가. data: 그림은 저장소 파일로 바꿔서 올려요.
@@ -1198,14 +1455,9 @@
   });
 
   (async function init() {
-    let token = '';
-    try { token = localStorage.getItem(TOKEN_KEY) || ''; } catch (e) { /* ignore */ }
-    if (token) {
-      try {
-        await login(token);
-      } catch (err) {
-        if (err.status === 401 || err.status === 403) logout();
-      }
+    await restoreSession();
+    if (!state.accounts) {
+      try { state.accounts = await fetchAccounts(); } catch (e) { /* 로그인 화면에서 다시 시도 */ }
     }
     try {
       await loadDb();
