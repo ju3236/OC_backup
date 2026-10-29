@@ -185,6 +185,7 @@
       characters: arr(d.characters).map(normalizeChar),
       posts: arr(d.posts).map(normalizePost),
       comments: arr(d.comments).map(normalizeComment),
+      templates: arr(d.templates).map(normalizeTemplate),
     };
   }
 
@@ -1050,21 +1051,136 @@
   }
   const pendingFiles = (d) => d.images.filter((i) => d._files[i.src]).map((i) => ({ path: i.src, base64: d._files[i.src] }));
 
+  // ---------- templates (문서 틀) ----------
+  // 프로필 항목·묶음 제목·목차·경고문 같은 '구조'만 저장해 두고, 새 문서를 만들 때 골라 써요.
+  const BUILTIN_TEMPLATES = [
+    {
+      id: 'builtin-oc', builtin: true, kind: 'oc', name: '기본 프로필', owner: '', notices: [],
+      profile: ['나이', '성별', '키', '생일', '소속'].map((label) => ({ type: 'row', label, value: '' })),
+      chapters: ['개요', '외모', '성격', '배경', '기타'].map((title) => ({ title, body: '', children: [] })),
+    },
+    { id: 'builtin-doc', builtin: true, kind: 'doc', name: '일반 문서', owner: '', notices: [], profile: [], chapters: [{ title: '개요', body: '', children: [] }] },
+    { id: 'builtin-blank', builtin: true, kind: '', name: '빈 문서', owner: '', notices: [], profile: [], chapters: [] },
+  ];
+
+  function normalizeTemplate(t) {
+    return {
+      id: str(t.id) || uid('tpl'),
+      owner: str(t.owner),
+      name: str(t.name) || '이름 없는 틀',
+      kind: t.kind === 'doc' ? 'doc' : 'oc',
+      notices: arr(t.notices).map((n) => ({ icon: str(n.icon) || '⚠️', text: str(n.text) })),
+      profile: arr(t.profile).map((r) => ({ type: r.type === 'head' ? 'head' : 'row', label: str(r.label), value: '' })),
+      chapters: normChapters(t.chapters, 0),
+      createdAt: t.createdAt || new Date().toISOString(),
+    };
+  }
+  const templatesFor = (kind) => [
+    ...BUILTIN_TEMPLATES.filter((t) => t.kind === kind || !t.kind),
+    ...db().templates.filter((t) => t.kind === kind),
+  ];
+  const findTemplate = (id) => BUILTIN_TEMPLATES.find((t) => t.id === id) || db().templates.find((t) => t.id === id);
+
+  // 틀의 챕터는 제목만, 새 id로 복사
+  const copyChapters = (list) => list.map((ch) => ({ id: uid('ch'), title: ch.title, body: '', children: copyChapters(ch.children) }));
+  // 문서에서 구조만 뽑아 틀로
+  function templateFromDraft(d, name) {
+    const strip = (list) => list.map((ch) => ({ title: ch.title.trim(), body: '', children: strip(ch.children) })).filter((ch) => ch.title || ch.children.length);
+    const files = [];
+    return normalizeTemplate({
+      id: uid('tpl'),
+      owner: state.user.login,
+      name,
+      kind: d.kind,
+      notices: d.notices.map((n) => ({ icon: n.icon, text: isBlankHtml(n.text) ? '' : cleanHtml(n.text, 'store', files) })).filter((n) => n.text),
+      profile: d.profile.map((r) => ({ type: r.type, label: r.label.trim() })).filter((r) => r.label),
+      chapters: strip(d.chapters),
+    });
+  }
+
+  function flatTitles(list, prefix, out) {
+    list.forEach((ch, i) => {
+      const num = prefix ? `${prefix}.${i + 1}` : String(i + 1);
+      out.push(`${num}. ${ch.title || '(제목 없음)'}`);
+      flatTitles(ch.children, num, out);
+    });
+    return out;
+  }
+
+  function renderTemplatePicker(kind) {
+    renderChrome(kind === 'doc' ? 'docs' : 'oc');
+    if (!state.user) return requireLogin();
+    const noun = kind === 'doc' ? '문서' : '캐릭터';
+    const list = templatesFor(kind);
+    $app.innerHTML = `
+      <a class="back" href="${kind === 'doc' ? '#/docs' : '#/'}">← ${noun} 목록</a>
+      <div class="page-head"><h1>새 ${noun} · 틀 고르기</h1></div>
+      <p class="muted" style="margin-top:-6px">틀을 고르면 프로필 항목과 목차가 미리 채워져요. 편집 화면의 <b>틀로 저장</b>으로 나만의 틀(예: AU 프로필)을 만들 수 있어요.</p>
+      <div class="tpl-grid">
+        ${list.map((t) => {
+          const rows = t.profile.map((r) => (r.type === 'head' ? `[${r.label}]` : r.label));
+          const toc = flatTitles(t.chapters, '', []);
+          return `<div class="tpl-card">
+            <a class="tpl-main" href="#/new?kind=${kind}&tpl=${encId(t.id)}">
+              <div class="tpl-name">${esc(t.name)}</div>
+              <div class="tpl-by">${t.builtin ? '기본 제공' : byline(t.owner)}</div>
+              ${rows.length ? `<div class="tpl-line"><b>프로필</b> ${esc(rows.join(' · '))}</div>` : ''}
+              ${toc.length ? `<div class="tpl-line"><b>목차</b> ${esc(toc.slice(0, 10).join('  '))}${toc.length > 10 ? ' …' : ''}</div>` : ''}
+              ${t.notices.length ? `<div class="tpl-line"><b>경고문</b> ${t.notices.length}개</div>` : ''}
+              ${!rows.length && !toc.length ? '<div class="tpl-line muted">아무것도 없이 시작해요</div>' : ''}
+            </a>
+            ${!t.builtin && isMine(t.owner) ? `<div class="tpl-ctl">
+              <button type="button" class="link-btn" data-tpl-rename="${esc(t.id)}">이름 바꾸기</button>
+              <button type="button" class="link-btn" data-tpl-del="${esc(t.id)}">삭제</button></div>` : ''}
+          </div>`;
+        }).join('')}
+      </div>`;
+
+    $app.querySelectorAll('[data-tpl-del]').forEach((b) => b.addEventListener('click', async () => {
+      const t = findTemplate(b.dataset.tplDel);
+      if (!t || !confirm(`'${t.name}' 틀을 지울까요? 이 틀로 만든 문서는 그대로 남아요.`)) return;
+      if (await trySave(`틀 삭제: ${t.name}`, (d) => { d.templates = d.templates.filter((x) => x.id !== t.id); })) renderTemplatePicker(kind);
+    }));
+    $app.querySelectorAll('[data-tpl-rename]').forEach((b) => b.addEventListener('click', async () => {
+      const t = findTemplate(b.dataset.tplRename);
+      const name = t && (prompt('새 이름', t.name) || '').trim();
+      if (!name || name === t.name) return;
+      if (await trySave(`틀 이름 변경: ${name}`, (d) => { const x = d.templates.find((y) => y.id === t.id); if (x) x.name = name; })) renderTemplatePicker(kind);
+    }));
+  }
+
+  async function saveDraftAsTemplate(d) {
+    const name = (prompt('틀 이름 (예: AU 프로필)\n지금 문서의 프로필 항목·목차·경고문만 저장되고, 내용은 저장되지 않아요.', '') || '').trim();
+    if (!name) return;
+    const same = db().templates.find((t) => t.kind === d.kind && t.name === name);
+    if (same && !isMine(same.owner)) return alert('같은 이름의 틀이 이미 있어요. 다른 이름으로 지어 주세요.');
+    if (same && !confirm(`'${name}' 틀이 이미 있어요. 지금 구조로 덮어쓸까요?`)) return;
+    const t = templateFromDraft(d, name);
+    if (same) t.id = same.id;
+    const ok = await trySave(`틀 ${same ? '수정' : '추가'}: ${name}`, (next) => {
+      const i = next.templates.findIndex((x) => x.id === t.id);
+      if (i >= 0) next.templates[i] = t; else next.templates.push(t);
+    });
+    if (ok) toast(`'${name}' 틀을 저장했어요. 문서 자체는 아직 저장 전이에요.`, 3500);
+  }
+
   // ---------- character / document editor (위키처럼 문서 위에서 바로 편집) ----------
   function renderCharEditor(id, query) {
     if (!state.user) { renderChrome('oc'); return requireLogin(); }
-    const key = 'oc:' + (id || 'new');
+    const key = 'oc:' + (id || `new:${query.kind}:${query.tpl}`);
     if (!state.draft || state.draft._for !== key) {
       const base = id ? findChar(id) : null;
       if (id && (!base || !isMine(base.owner))) { renderChrome('oc'); return renderNotFound(); }
       const kind = base ? base.kind : (query.kind === 'doc' ? 'doc' : 'oc');
+      const tpl = findTemplate(query.tpl) || templatesFor(kind)[0];
       const d = JSON.parse(JSON.stringify(base || normalizeChar({
         id: uid(kind),
         kind,
         doc: 3,
         name: '',
-        profile: kind === 'oc' ? ['나이', '성별', '키', '생일', '소속'].map((label) => ({ type: 'row', label, value: '' })) : [],
-        chapters: (kind === 'oc' ? ['개요', '외모', '성격', '배경', '기타'] : ['개요']).map((title) => ({ title, body: '', children: [] })),
+        notices: tpl.notices.map((n) => ({ ...n })),
+        profile: tpl.profile.map((r) => ({ type: r.type, label: r.label, value: '' })),
+        chapters: copyChapters(tpl.chapters),
       })));
       if (!base) d.name = '';
       d.tagsText = d.tags.join(', ');
@@ -1106,6 +1222,7 @@
         <div class="wiki-edit-head">
           <a class="back" href="${cancel}">← 취소</a>
           <span class="muted">문서를 눌러서 바로 쓰고, 글자를 고른 뒤 위 도구로 꾸며요.</span>
+          <button type="button" class="btn btn-sm tpl-save" id="save-tpl" title="지금 문서의 프로필 항목·목차·경고문을 틀로 저장">📋 틀로 저장</button>
         </div>
 
         <details class="fieldset doc-info" ${d.name ? '' : 'open'}>
@@ -1243,6 +1360,7 @@
     });
 
     bindToolbar($form, d);
+    document.getElementById('save-tpl').addEventListener('click', () => { sync(); saveDraftAsTemplate(d); });
 
     $form.addEventListener('submit', async (e) => {
       e.preventDefault();
@@ -1888,6 +2006,7 @@
 
     if (page === 'oc' && id) renderDetail(id);
     else if (page === 'edit' && id) renderCharEditor(id, query);
+    else if (page === 'new' && !query.tpl) { state.draft = null; renderTemplatePicker(query.kind === 'doc' ? 'doc' : 'oc'); }
     else if (page === 'new') renderCharEditor('', query);
     else if (page === 'posts') renderPosts();
     else if (page === 'post' && id) renderPost(id);
