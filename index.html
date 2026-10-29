@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>자캐 백업</title>
+  <meta name="description" content="내 자캐(OC) 프로필, 설정, 그림을 모아두는 백업 아카이브">
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>📁</text></svg>">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@400;500;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+  <header class="topbar">
+    <a href="#/" class="brand">📁 <span id="site-title">자캐 백업</span></a>
+    <nav class="topnav">
+      <a href="#/new" class="btn btn-primary">+ 새 캐릭터</a>
+      <a href="#/backup" class="btn">백업 / 복원</a>
+      <button type="button" class="btn btn-icon" id="theme-toggle" title="테마 전환" aria-label="테마 전환">◐</button>
+    </nav>
+  </header>
+
+  <div id="banner" class="banner" hidden></div>
+
+  <main id="app" class="container"></main>
+
+  <div id="lightbox" class="lightbox" hidden>
+    <button type="button" class="lightbox-close" aria-label="닫기">×</button>
+    <img alt="">
+    <p class="lightbox-caption"></p>
+  </div>
+
+  <script src="data/characters.js"></script>
+  <script src="js/app.js"></script>
+</body>
+</html>
