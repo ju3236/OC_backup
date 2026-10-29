@@ -2,7 +2,104 @@
  "version": 2,
  "siteTitle": "자캐 백업",
  "members": {},
- "characters": [],
+ "characters": [
+  {
+   "id": "oc-mvsw46cggvzl6",
+   "owner": "alswl076",
+   "name": "천사별",
+   "subname": "",
+   "world": "",
+   "summary": "",
+   "color": "#90c0e8",
+   "avatar": "",
+   "tags": [],
+   "kind": "oc",
+   "doc": 3,
+   "notices": [],
+   "profile": [
+    {
+     "type": "row",
+     "label": "나이",
+     "value": "17세"
+    },
+    {
+     "type": "row",
+     "label": "성별",
+     "value": "여성"
+    },
+    {
+     "type": "row",
+     "label": "키",
+     "value": "160cm"
+    },
+    {
+     "type": "row",
+     "label": "생일",
+     "value": "10월 4일"
+    }
+   ],
+   "chapters": [
+    {
+     "id": "ch-mvsw46cg38tee",
+     "title": "개요",
+     "body": "그새키마즘",
+     "children": []
+    },
+    {
+     "id": "ch-mvsw46cgyt3nm",
+     "title": "외모",
+     "body": "은교여시",
+     "children": []
+    },
+    {
+     "id": "ch-mvsw46cg456vo",
+     "title": "성격",
+     "body": "공사판",
+     "children": []
+    },
+    {
+     "id": "ch-mvsw46cgcoc6s",
+     "title": "배경",
+     "body": "심친자",
+     "children": []
+    },
+    {
+     "id": "ch-mvsw46cgop1ji",
+     "title": "기타",
+     "body": "",
+     "children": []
+    }
+   ],
+   "images": [
+    {
+     "src": "images/alswl076/img-mvsw5fx8cbizf.png",
+     "caption": ""
+    }
+   ],
+   "relations": [
+    {
+     "id": "",
+     "name": "안심해",
+     "type": "짝사랑",
+     "note": ""
+    },
+    {
+     "id": "",
+     "name": "이아이",
+     "type": "친구",
+     "note": ""
+    },
+    {
+     "id": "",
+     "name": "김가을",
+     "type": "혐오",
+     "note": ""
+    }
+   ],
+   "createdAt": "2026-10-29T01:54:18.016Z",
+   "updatedAt": "2026-10-29T01:56:21.094Z"
+  }
+ ],
  "posts": [],
  "comments": []
 }
