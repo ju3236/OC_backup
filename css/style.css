@@ -806,3 +806,6 @@ sup.fn { position: relative; color: var(--oc, var(--accent)); cursor: pointer; f
 .tpl-line b { color: var(--text); font-weight: 500; margin-right: 4px; }
 .tpl-ctl { display: flex; gap: 12px; justify-content: flex-end; padding: 0 16px 10px; }
 .tpl-save { margin-left: auto; }
+.tpl-ctl { align-items: center; }
+.tpl-mode .wiki-body, .tpl-mode .ib-img, .tpl-mode .ed-extra { display: none; }
+.tpl-ph { color: var(--muted); font-size: 12px; }

@@ -1075,11 +1075,22 @@
       createdAt: t.createdAt || new Date().toISOString(),
     };
   }
+  // 기본 제공 틀을 고치면 같은 id로 저장돼서 원래 것을 대신해요
+  const withOverride = (b) => {
+    const o = db().templates.find((t) => t.id === b.id);
+    return o ? { ...o, builtin: true, edited: true, kind: b.kind } : b;
+  };
+  const isBuiltinId = (id) => BUILTIN_TEMPLATES.some((t) => t.id === id);
   const templatesFor = (kind) => [
-    ...BUILTIN_TEMPLATES.filter((t) => t.kind === kind || !t.kind),
-    ...db().templates.filter((t) => t.kind === kind),
+    ...BUILTIN_TEMPLATES.filter((t) => t.kind === kind || !t.kind).map(withOverride),
+    ...db().templates.filter((t) => t.kind === kind && !isBuiltinId(t.id)),
   ];
-  const findTemplate = (id) => BUILTIN_TEMPLATES.find((t) => t.id === id) || db().templates.find((t) => t.id === id);
+  const findTemplate = (id) => {
+    const b = BUILTIN_TEMPLATES.find((t) => t.id === id);
+    return b ? withOverride(b) : db().templates.find((t) => t.id === id);
+  };
+  // 기본 제공 틀은 로그인한 누구나, 직접 만든 틀은 만든 사람(과 관리자)만 고쳐요
+  const canEditTemplate = (t) => !!state.user && (t.builtin || isMine(t.owner));
 
   // 틀의 챕터는 제목만, 새 id로 복사
   const copyChapters = (list) => list.map((ch) => ({ id: uid('ch'), title: ch.title, body: '', children: copyChapters(ch.children) }));
@@ -1123,15 +1134,16 @@
           return `<div class="tpl-card">
             <a class="tpl-main" href="#/new?kind=${kind}&tpl=${encId(t.id)}">
               <div class="tpl-name">${esc(t.name)}</div>
-              <div class="tpl-by">${t.builtin ? '기본 제공' : byline(t.owner)}</div>
+              <div class="tpl-by">${t.builtin ? (t.edited ? '기본 제공 · 고침' : '기본 제공') : byline(t.owner)}</div>
               ${rows.length ? `<div class="tpl-line"><b>프로필</b> ${esc(rows.join(' · '))}</div>` : ''}
               ${toc.length ? `<div class="tpl-line"><b>목차</b> ${esc(toc.slice(0, 10).join('  '))}${toc.length > 10 ? ' …' : ''}</div>` : ''}
               ${t.notices.length ? `<div class="tpl-line"><b>경고문</b> ${t.notices.length}개</div>` : ''}
               ${!rows.length && !toc.length ? '<div class="tpl-line muted">아무것도 없이 시작해요</div>' : ''}
             </a>
-            ${!t.builtin && isMine(t.owner) ? `<div class="tpl-ctl">
-              <button type="button" class="link-btn" data-tpl-rename="${esc(t.id)}">이름 바꾸기</button>
-              <button type="button" class="link-btn" data-tpl-del="${esc(t.id)}">삭제</button></div>` : ''}
+            ${canEditTemplate(t) ? `<div class="tpl-ctl">
+              <a class="btn btn-sm" href="#/tpl/${encId(t.id)}?kind=${kind}">✎ 수정</a>
+              ${t.builtin && t.edited ? `<button type="button" class="link-btn" data-tpl-reset="${esc(t.id)}">기본값으로 되돌리기</button>` : ''}
+              ${!t.builtin ? `<button type="button" class="link-btn" data-tpl-del="${esc(t.id)}">삭제</button>` : ''}</div>` : ''}
           </div>`;
         }).join('')}
       </div>`;
@@ -1141,12 +1153,55 @@
       if (!t || !confirm(`'${t.name}' 틀을 지울까요? 이 틀로 만든 문서는 그대로 남아요.`)) return;
       if (await trySave(`틀 삭제: ${t.name}`, (d) => { d.templates = d.templates.filter((x) => x.id !== t.id); })) renderTemplatePicker(kind);
     }));
-    $app.querySelectorAll('[data-tpl-rename]').forEach((b) => b.addEventListener('click', async () => {
-      const t = findTemplate(b.dataset.tplRename);
-      const name = t && (prompt('새 이름', t.name) || '').trim();
-      if (!name || name === t.name) return;
-      if (await trySave(`틀 이름 변경: ${name}`, (d) => { const x = d.templates.find((y) => y.id === t.id); if (x) x.name = name; })) renderTemplatePicker(kind);
+    $app.querySelectorAll('[data-tpl-reset]').forEach((b) => b.addEventListener('click', async () => {
+      const id = b.dataset.tplReset;
+      if (!confirm('고친 내용을 버리고 처음 기본 틀로 되돌릴까요?')) return;
+      if (await trySave('기본 틀 되돌리기', (d) => { d.templates = d.templates.filter((x) => x.id !== id); })) renderTemplatePicker(kind);
     }));
+  }
+
+  function renderTemplateEditor(id, query) {
+    const kind = query.kind === 'doc' ? 'doc' : 'oc';
+    renderChrome(kind === 'doc' ? 'docs' : 'oc');
+    if (!state.user) return requireLogin();
+    const t = findTemplate(id);
+    if (!t || !canEditTemplate(t)) return renderNotFound();
+    const key = `tpl:${id}:${kind}`;
+    if (!state.draft || state.draft._for !== key) {
+      const d = JSON.parse(JSON.stringify(normalizeChar({
+        id: 'tpl-draft', kind, doc: 3, name: t.name,
+        notices: t.notices.map((n) => ({ ...n })),
+        profile: t.profile.map((r) => ({ type: r.type, label: r.label, value: '' })),
+        chapters: copyChapters(t.chapters),
+      })));
+      d.tagsText = '';
+      d._for = key;
+      d._files = {};
+      d._tpl = { id: t.id, builtin: !!t.builtin, owner: t.owner, kind };
+      state.draft = d;
+      window.scrollTo(0, 0);
+    }
+    drawCharEditor('');
+  }
+
+  async function saveTemplateDraft(d, $btn) {
+    const name = d.name.trim();
+    if (!name) return toast('틀 이름을 입력해 주세요');
+    const t = templateFromDraft(d, name);
+    t.id = d._tpl.id;
+    t.owner = d._tpl.builtin ? '' : (d._tpl.owner || state.user.login);
+    $btn.disabled = true;
+    const ok = await trySave(`틀 수정: ${name}`, (next) => {
+      const i = next.templates.findIndex((x) => x.id === t.id);
+      if (i >= 0) next.templates[i] = t; else next.templates.push(t);
+    });
+    if (ok) {
+      state.draft = null;
+      toast('틀을 저장했어요');
+      location.hash = '#/new?kind=' + d._tpl.kind;
+    } else {
+      $btn.disabled = false;
+    }
   }
 
   async function saveDraftAsTemplate(d) {
@@ -1213,19 +1268,23 @@
     const isDoc = d.kind === 'doc';
     const others = db().characters.filter((c) => c.id !== d.id);
     const scrollY = window.scrollY;
-    const cancel = id ? '#/oc/' + encId(id) : (isDoc ? '#/docs' : '#/');
+    const isTpl = !!d._tpl;
+    const cancel = isTpl ? '#/new?kind=' + d._tpl.kind : id ? '#/oc/' + encId(id) : (isDoc ? '#/docs' : '#/');
     const cover = coverOf(d);
 
     $app.innerHTML = `
-      <form class="wiki wiki-edit" id="editor" autocomplete="off" style="--oc:${safeColor(d.color)};--accent:${safeColor(d.color)}">
-        ${toolbarHtml()}
+      <form class="wiki wiki-edit ${isTpl ? 'tpl-mode' : ''}" id="editor" autocomplete="off" style="--oc:${safeColor(d.color)};--accent:${safeColor(d.color)}">
+        ${isTpl ? '' : toolbarHtml()}
         <div class="wiki-edit-head">
           <a class="back" href="${cancel}">← 취소</a>
-          <span class="muted">문서를 눌러서 바로 쓰고, 글자를 고른 뒤 위 도구로 꾸며요.</span>
-          <button type="button" class="btn btn-sm tpl-save" id="save-tpl" title="지금 문서의 프로필 항목·목차·경고문을 틀로 저장">📋 틀로 저장</button>
+          ${isTpl ? '<span class="muted">틀 수정 중이에요. 프로필 항목 이름, 묶음 제목, 챕터 제목, 경고문을 고칠 수 있어요.</span>'
+            : `<span class="muted">문서를 눌러서 바로 쓰고, 글자를 고른 뒤 위 도구로 꾸며요.</span>
+          <button type="button" class="btn btn-sm tpl-save" id="save-tpl" title="지금 문서의 프로필 항목·목차·경고문을 틀로 저장">📋 틀로 저장</button>`}
         </div>
 
-        <details class="fieldset doc-info" ${d.name ? '' : 'open'}>
+        ${isTpl ? `<div class="fieldset"><div class="field" style="margin:0"><label for="f-name">틀 이름 *</label>
+          <input type="text" id="f-name" data-path="name" value="${esc(d.name)}" required>
+          ${d._tpl.builtin ? '<div class="hint">기본 제공 틀이에요. 고치면 모두에게 바뀐 틀이 보이고, 틀 고르기 화면에서 언제든 기본값으로 되돌릴 수 있어요.</div>' : ''}</div></div>` : `<details class="fieldset doc-info" ${d.name ? '' : 'open'}>
           <summary>문서 정보 <span class="muted">이름 · 분류 · 색</span></summary>
           <div class="row2">
             <div class="field"><label for="f-name">${isDoc ? '문서 제목' : '이름'} *</label>
@@ -1244,7 +1303,7 @@
             <input type="text" id="f-tags" data-path="tagsText" value="${esc(d.tagsText)}" placeholder="쉼표로 구분 (예: 인간, 마법사, 주인공)"></div>
           <div class="field"><label for="f-summary">한 줄 소개 <span class="muted">(목록 카드에 보여요)</span></label>
             <input type="text" id="f-summary" data-path="summary" value="${esc(d.summary)}"></div>
-        </details>
+        </details>`}
 
         <div class="wiki-head"><h1 id="ed-title">${esc(d.name || (isDoc ? '문서 제목' : '이름'))}</h1></div>
 
@@ -1267,7 +1326,7 @@
               ? `<tr><th colspan="2" class="ib-group" contenteditable="true" data-text="profile.${i}.label" data-placeholder="묶음 제목">${esc(r.label)}</th>
                  <td class="row-x"><button type="button" class="x" data-act="del" data-list="profile" data-i="${i}" aria-label="삭제">×</button></td></tr>`
               : `<tr><th contenteditable="true" data-text="profile.${i}.label" data-placeholder="항목">${esc(r.label)}</th>
-                 <td contenteditable="true" data-html="profile.${i}.value" data-placeholder="내용">${cleanHtml(r.value, 'view')}</td>
+                 ${isTpl ? '<td class="tpl-ph">문서마다 따로 써요</td>' : `<td contenteditable="true" data-html="profile.${i}.value" data-placeholder="내용">${cleanHtml(r.value, 'view')}</td>`}
                  <td class="row-x"><button type="button" class="x" data-act="del" data-list="profile" data-i="${i}" aria-label="삭제">×</button></td></tr>`)).join('')}
             </tbody></table>
             <div class="ib-add">
@@ -1279,14 +1338,14 @@
 
         ${chaptersHtml(d.chapters, '', '', true)}
         <button type="button" class="btn btn-sm add-ch" data-ch-act="add-top">+ 챕터 추가</button>
-        <p class="hint">빈 항목과 빈 챕터는 저장할 때 빠져요. 내용이 비어도 제목이 있는 챕터는 남아요.</p>
+        <p class="hint">${isTpl ? '이름이 빈 항목과 제목이 빈 챕터는 저장할 때 빠져요.' : '빈 항목과 빈 챕터는 저장할 때 빠져요. 내용이 비어도 제목이 있는 챕터는 남아요.'}</p>
 
-        <div class="fieldset">
+        <div class="fieldset ed-extra">
           <div class="fieldset-title">그림</div>
           ${imagesFieldHtml(d, true)}
         </div>
 
-        <div class="fieldset">
+        <div class="fieldset ed-extra">
           <div class="fieldset-title">관계</div>
           <div class="rows">
             ${d.relations.map((r, i) => `
@@ -1304,7 +1363,7 @@
 
         <div class="form-actions">
           <a class="btn" href="${cancel}">취소</a>
-          <button type="submit" class="btn btn-primary">저장</button>
+          <button type="submit" class="btn btn-primary">${isTpl ? '틀 저장' : '저장'}</button>
         </div>
       </form>`;
 
@@ -1359,12 +1418,15 @@
       document.execCommand('insertText', false, (e.clipboardData.getData('text/plain') || '').replace(/\s+/g, ' '));
     });
 
-    bindToolbar($form, d);
-    document.getElementById('save-tpl').addEventListener('click', () => { sync(); saveDraftAsTemplate(d); });
+    if (!isTpl) {
+      bindToolbar($form, d);
+      document.getElementById('save-tpl').addEventListener('click', () => { sync(); saveDraftAsTemplate(d); });
+    }
 
     $form.addEventListener('submit', async (e) => {
       e.preventDefault();
       sync();
+      if (isTpl) return saveTemplateDraft(d, $form.querySelector('[type=submit]'));
       const name = d.name.trim();
       if (!name) {
         $form.querySelector('.doc-info').open = true;
@@ -1996,7 +2058,7 @@
     const query = Object.fromEntries(new URLSearchParams(qs || ''));
     return { page: page || '', id: rawId ? decodeURIComponent(rawId) : '', query };
   }
-  const isEditing = (page) => page === 'edit' || page === 'new' || page === 'write';
+  const isEditing = (page) => page === 'edit' || page === 'new' || page === 'write' || page === 'tpl';
 
   function route() {
     $lightbox.hidden = true;
@@ -2006,6 +2068,7 @@
 
     if (page === 'oc' && id) renderDetail(id);
     else if (page === 'edit' && id) renderCharEditor(id, query);
+    else if (page === 'tpl' && id) renderTemplateEditor(id, query);
     else if (page === 'new' && !query.tpl) { state.draft = null; renderTemplatePicker(query.kind === 'doc' ? 'doc' : 'oc'); }
     else if (page === 'new') renderCharEditor('', query);
     else if (page === 'posts') renderPosts();
