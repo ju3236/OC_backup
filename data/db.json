@@ -1,6 +1,6 @@
 {
  "version": 2,
- "siteTitle": "자캐 백업",
+ "siteTitle": "백하위키",
  "members": {},
  "characters": [
   {
@@ -101,5 +101,6 @@
   }
  ],
  "posts": [],
- "comments": []
+ "comments": [],
+ "templates": []
 }
