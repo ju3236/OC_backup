@@ -1,0 +1,17 @@
+{
+ "version": 1,
+ "token": {
+  "iv": "/k8uO2g+gIJ/OOz5",
+  "ct": "/VJxn9SwxUNyjqp6do5tf0inSsuPY+buGMyHA7OXe1E/tXExiOkPmRS5K31WBKt5cDltkqSKPa7T32NNwaDBOWHJZVjhvbxAScoSUSYnniw5z/1r1bJsqQVCnrM8sVGOQF7tHW+biUTCJ1jtgg=="
+ },
+ "users": {
+  "alswl076": {
+   "salt": "XMuWcQHA6zYvuSHaqYebsw==",
+   "iter": 310000,
+   "iv": "niD0CntzGFAqSVub",
+   "ct": "wy77/Jodp/55bi4uyb790xKzNbSJLhmSsb666QFqTVpX6g0N36Auyfm5k+AI5GkE",
+   "admin": true,
+   "createdAt": "2026-10-29T01:38:27.867Z"
+  }
+ }
+}
