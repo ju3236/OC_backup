@@ -102,5 +102,78 @@
  ],
  "posts": [],
  "comments": [],
- "templates": []
+ "templates": [
+  {
+   "id": "tpl-mvv64vw44v9q0",
+   "owner": "alswl076",
+   "name": "기본 프로필",
+   "kind": "oc",
+   "notices": [],
+   "profile": [
+    {
+     "type": "row",
+     "label": "나이",
+     "value": ""
+    },
+    {
+     "type": "row",
+     "label": "성별",
+     "value": ""
+    },
+    {
+     "type": "row",
+     "label": "키",
+     "value": ""
+    },
+    {
+     "type": "row",
+     "label": "생일",
+     "value": ""
+    },
+    {
+     "type": "row",
+     "label": "혈액형",
+     "value": ""
+    },
+    {
+     "type": "row",
+     "label": "소속",
+     "value": ""
+    }
+   ],
+   "chapters": [
+    {
+     "id": "ch-mvv64vw4l9732",
+     "title": "개요",
+     "body": "",
+     "children": []
+    },
+    {
+     "id": "ch-mvv64vw49o58r",
+     "title": "외모",
+     "body": "",
+     "children": []
+    },
+    {
+     "id": "ch-mvv64vw4d4zhf",
+     "title": "성격",
+     "body": "",
+     "children": []
+    },
+    {
+     "id": "ch-mvv64vw41an44",
+     "title": "배경",
+     "body": "",
+     "children": []
+    },
+    {
+     "id": "ch-mvv64vw4dra1n",
+     "title": "기타",
+     "body": "",
+     "children": []
+    }
+   ],
+   "createdAt": "2026-10-30T16:10:19.636Z"
+  }
+ ]
 }
